@@ -219,7 +219,7 @@ jobs:
           IMAGE="${{ env.IMAGE_NAME }}:v${{ needs.check-upstream.outputs.version }}"
           docker run -d \
             --name router-test \
-            -p 8001:8001 \
+            -p 8080:8080 \
             -v /tmp/router.yml:/etc/vllm/router.yml:ro \
             "$IMAGE" --dynamic-config-yaml /etc/vllm/router.yml
 
@@ -232,7 +232,7 @@ jobs:
         run: |
           MAX_RETRIES=10
           for i in $(seq 1 $MAX_RETRIES); do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8001/health || true)
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health || true)
             echo "Attempt $i/$MAX_RETRIES: HTTP $HTTP_CODE"
             if [[ "$HTTP_CODE" =~ ^[2345][0-9][0-9]$ ]]; then
               echo "Router responding. Smoke test passed."
