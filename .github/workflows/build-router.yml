@@ -117,6 +117,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
           UPSTREAM_TAG="${{ needs.check-upstream.outputs.upstream_tag }}"
 
           # Add upstream remote and fetch tags
