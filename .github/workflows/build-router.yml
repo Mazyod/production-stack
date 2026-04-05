@@ -1,0 +1,283 @@
+name: Build and Push Router Image
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Force a specific upstream tag (e.g. vllm-stack-0.1.10)"
+        required: false
+        default: ""
+
+  push:
+    branches: [main]
+    paths:
+      - "docker/Dockerfile"
+      - "src/vllm_router/**"
+      - "pyproject.toml"
+      - ".github/workflows/build-router.yml"
+
+env:
+  IMAGE_NAME: ghcr.io/mazyod/production-stack-router
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Find the latest upstream tag and decide whether to build
+  # ---------------------------------------------------------------------------
+  check-upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      should_build: ${{ steps.resolve.outputs.should_build }}
+    steps:
+      - name: Resolve upstream tag
+        id: resolve
+        run: |
+          set -euo pipefail
+
+          TRIGGER="${{ github.event_name }}"
+          INPUT_TAG="${{ github.event.inputs.upstream_tag }}"
+
+          if [[ "$TRIGGER" == "workflow_dispatch" && -n "$INPUT_TAG" ]]; then
+            echo "Using manually supplied tag: $INPUT_TAG"
+            UPSTREAM_TAG="$INPUT_TAG"
+          else
+            # Query upstream tags via GitHub API
+            TAGS_JSON=$(curl -sf "https://api.github.com/repos/vllm-project/production-stack/tags?per_page=20")
+            UPSTREAM_TAG=$(echo "$TAGS_JSON" | jq -r '
+              [ .[].name | select(startswith("vllm-stack-")) ] | first // empty
+            ')
+
+            if [[ -z "$UPSTREAM_TAG" ]]; then
+              echo "::error::No vllm-stack-* tags found upstream"
+              exit 1
+            fi
+
+            echo "Latest upstream tag: $UPSTREAM_TAG"
+          fi
+
+          # Extract version number: vllm-stack-0.1.10 -> 0.1.10
+          VERSION="${UPSTREAM_TAG#vllm-stack-}"
+          echo "Version: $VERSION"
+
+          # Decide whether to build
+          if [[ "$TRIGGER" == "push" || ("$TRIGGER" == "workflow_dispatch" && -n "$INPUT_TAG") ]]; then
+            SHOULD_BUILD="true"
+          else
+            # Scheduled: skip if we already published this version
+            TOKEN=$(curl -sf "https://ghcr.io/token?scope=repository:mazyod/production-stack-router:pull" | jq -r '.token')
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json" \
+              "https://ghcr.io/v2/mazyod/production-stack-router/manifests/${UPSTREAM_TAG}")
+
+            if [[ "$HTTP_CODE" == "200" ]]; then
+              echo "Image ${UPSTREAM_TAG} already exists — skipping."
+              SHOULD_BUILD="false"
+            else
+              echo "Image ${UPSTREAM_TAG} not found — will build."
+              SHOULD_BUILD="true"
+            fi
+          fi
+
+          echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "========================================"
+          echo "  Upstream tag : $UPSTREAM_TAG"
+          echo "  Version      : $VERSION"
+          echo "  Should build : $SHOULD_BUILD"
+          echo "========================================"
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Checkout upstream tag, apply patches, build, and push
+  # ---------------------------------------------------------------------------
+  build-and-push:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare patched source from upstream tag
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_TAG="${{ needs.check-upstream.outputs.upstream_tag }}"
+
+          # Add upstream remote and fetch tags
+          git remote add upstream https://github.com/vllm-project/production-stack.git
+          git fetch upstream --tags
+
+          # Collect our patch commits (everything on main after the upstream merge base)
+          MERGE_BASE=$(git merge-base HEAD upstream/main)
+          PATCH_COMMITS=$(git rev-list --reverse "${MERGE_BASE}..HEAD")
+          PATCH_COUNT=$(echo "$PATCH_COMMITS" | wc -l | tr -d ' ')
+          echo "Found $PATCH_COUNT patch commit(s) to apply"
+
+          # Checkout the upstream tag
+          git checkout "$UPSTREAM_TAG"
+
+          # Cherry-pick our patches on top
+          for COMMIT in $PATCH_COMMITS; do
+            MSG=$(git log --format='%s' -1 "$COMMIT")
+            echo "Cherry-picking: $MSG ($COMMIT)"
+            git cherry-pick --no-commit "$COMMIT"
+            git commit -m "$MSG" --author="$(git log --format='%an <%ae>' -1 "$COMMIT")"
+          done
+
+          echo "Source ready: $UPSTREAM_TAG + $PATCH_COUNT patches"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.upstream_tag }}
+            ${{ env.IMAGE_NAME }}:v${{ needs.check-upstream.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "### Build Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Upstream tag:** \`${{ needs.check-upstream.outputs.upstream_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tags:**" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - \`${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.upstream_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - \`${{ env.IMAGE_NAME }}:v${{ needs.check-upstream.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Smoke test the built image
+  # ---------------------------------------------------------------------------
+  test:
+    needs: [check-upstream, build-and-push]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull the built image
+        run: |
+          IMAGE="${{ env.IMAGE_NAME }}:v${{ needs.check-upstream.outputs.version }}"
+          echo "Pulling $IMAGE ..."
+          docker pull "$IMAGE"
+
+      - name: Create test config
+        run: |
+          cat > /tmp/router.yml << 'YAML'
+          service_discovery: static
+          routing_logic: roundrobin
+          static_models:
+            test-model:
+              static_model_type: chat
+              static_backends:
+                - http://localhost:9999
+          YAML
+
+      - name: Start router container
+        run: |
+          IMAGE="${{ env.IMAGE_NAME }}:v${{ needs.check-upstream.outputs.version }}"
+          docker run -d \
+            --name router-test \
+            -p 8001:8001 \
+            -v /tmp/router.yml:/etc/vllm/router.yml:ro \
+            "$IMAGE" --dynamic-config-yaml /etc/vllm/router.yml
+
+          sleep 5
+          echo "::group::Container logs"
+          docker logs router-test
+          echo "::endgroup::"
+
+      - name: Smoke test /health endpoint
+        run: |
+          MAX_RETRIES=10
+          for i in $(seq 1 $MAX_RETRIES); do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8001/health || true)
+            echo "Attempt $i/$MAX_RETRIES: HTTP $HTTP_CODE"
+            if [[ "$HTTP_CODE" =~ ^[2345][0-9][0-9]$ ]]; then
+              echo "Router responding. Smoke test passed."
+              break
+            fi
+            if [[ "$i" -eq "$MAX_RETRIES" ]]; then
+              echo "::error::Router did not respond."
+              docker logs router-test
+              exit 1
+            fi
+            sleep 3
+          done
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f router-test 2>/dev/null || true
+
+  # ---------------------------------------------------------------------------
+  # Job 4: Tag as :latest after tests pass
+  # ---------------------------------------------------------------------------
+  tag-latest:
+    needs: [check-upstream, build-and-push, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag image as latest
+        run: |
+          SOURCE="${{ env.IMAGE_NAME }}:v${{ needs.check-upstream.outputs.version }}"
+          TARGET="${{ env.IMAGE_NAME }}:latest"
+          echo "Tagging $SOURCE as $TARGET ..."
+          docker buildx imagetools create --tag "$TARGET" "$SOURCE"
+
+      - name: Summary
+        run: |
+          echo "### Release Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.upstream_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${{ env.IMAGE_NAME }}:v${{ needs.check-upstream.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${{ env.IMAGE_NAME }}:latest\`" >> "$GITHUB_STEP_SUMMARY"
