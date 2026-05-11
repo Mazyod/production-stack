@@ -11,10 +11,10 @@ This is a lightweight fork of [vllm-project/production-stack](https://github.com
 - **Default port 8080**: Changed from 8001 to match the [vllm-project/router](https://github.com/vllm-project/router) default for easier future migration.
 - **numpy unpinned**: `>=1.26.4` instead of `==1.26.4` (no Python 3.13 wheels for 1.26.4).
 
-Pre-built images are published to ghcr.io, tagged to match upstream releases:
+Pre-built images are published to Docker Hub, tagged to match upstream releases:
 
 ```
-docker pull ghcr.io/mazyod/production-stack-router:v0.1.10
+docker pull openimage/production-stack-router:v0.1.10
 ```
 
 ---

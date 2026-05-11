@@ -20,7 +20,7 @@ on:
       - ".github/workflows/build-router.yml"
 
 env:
-  IMAGE_NAME: ghcr.io/mazyod/production-stack-router
+  IMAGE_NAME: docker.io/openimage/production-stack-router
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -30,7 +30,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: read
     outputs:
       upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
       version: ${{ steps.resolve.outputs.version }}
@@ -71,11 +70,8 @@ jobs:
             SHOULD_BUILD="true"
           else
             # Scheduled: skip if we already published this version
-            TOKEN=$(curl -sf "https://ghcr.io/token?scope=repository:mazyod/production-stack-router:pull" | jq -r '.token')
             HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-              -H "Authorization: Bearer $TOKEN" \
-              -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json" \
-              "https://ghcr.io/v2/mazyod/production-stack-router/manifests/${UPSTREAM_TAG}")
+              "https://hub.docker.com/v2/repositories/openimage/production-stack-router/tags/${UPSTREAM_TAG}")
 
             if [[ "$HTTP_CODE" == "200" ]]; then
               echo "Image ${UPSTREAM_TAG} already exists — skipping."
@@ -106,7 +102,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
@@ -148,12 +143,11 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to ghcr.io
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push image
         id: build
@@ -187,14 +181,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: read
     steps:
-      - name: Log in to ghcr.io
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Pull the built image
         run: |
@@ -258,17 +250,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to ghcr.io
+      - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Tag image as latest
         run: |
