@@ -133,9 +133,31 @@ jobs:
           # Cherry-pick our patches on top
           for COMMIT in $PATCH_COMMITS; do
             MSG=$(git log --format='%s' -1 "$COMMIT")
+            AUTHOR=$(git log --format='%an <%ae>' -1 "$COMMIT")
             echo "Cherry-picking: $MSG ($COMMIT)"
-            git cherry-pick --no-commit "$COMMIT"
-            git commit -m "$MSG" --author="$(git log --format='%an <%ae>' -1 "$COMMIT")"
+
+            if ! git cherry-pick --no-commit "$COMMIT"; then
+              # Honor patch deletions: if our patch removes a file that upstream
+              # modified between the merge-base and this tag, keep it removed.
+              UD_FILES=$(git status --porcelain | awk '/^UD / {print substr($0, 4)}')
+              if [[ -n "$UD_FILES" ]]; then
+                echo "Auto-resolving modify/delete conflicts (removing):"
+                echo "$UD_FILES"
+                while IFS= read -r f; do
+                  git rm -- "$f"
+                done <<< "$UD_FILES"
+              fi
+
+              # Any other unmerged paths are real conflicts — fail loudly.
+              UNRESOLVED=$(git diff --name-only --diff-filter=U)
+              if [[ -n "$UNRESOLVED" ]]; then
+                echo "::error::Unresolved conflicts after cherry-picking $COMMIT:"
+                echo "$UNRESOLVED"
+                exit 1
+              fi
+            fi
+
+            git commit -m "$MSG" --author="$AUTHOR" --allow-empty
           done
 
           echo "Source ready: $UPSTREAM_TAG + $PATCH_COUNT patches"
