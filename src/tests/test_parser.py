@@ -213,3 +213,49 @@ def test_parse_args_log_format_accepts_json(monkeypatch: pytest.MonkeyPatch) -> 
     )
     args = parser.parse_args()
     assert args.log_format == "json"
+
+
+def test_parse_args_timeout_keep_alive_defaults_to_5(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            sys.argv[0],
+            "--service-discovery",
+            "static",
+            "--static-backends",
+            "http://localhost:8000",
+            "--static-models",
+            "m1",
+            "--routing-logic",
+            "roundrobin",
+        ],
+    )
+    args = parser.parse_args()
+    assert args.timeout_keep_alive == 5
+
+
+def test_parse_args_timeout_keep_alive_accepts_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            sys.argv[0],
+            "--service-discovery",
+            "static",
+            "--static-backends",
+            "http://localhost:8000",
+            "--static-models",
+            "m1",
+            "--routing-logic",
+            "roundrobin",
+            "--timeout-keep-alive",
+            "120",
+        ],
+    )
+    args = parser.parse_args()
+    assert args.timeout_keep_alive == 120

@@ -72,6 +72,11 @@ class DynamicRouterConfig:
     # Logging Options
     callbacks: Optional[str] = None
 
+    # Server configurations
+    # Startup-only: applied when the uvicorn server boots, not hot-reloaded.
+    # Declared here so it is accepted (not rejected) in the config file.
+    timeout_keep_alive: Optional[int] = 5
+
     # Batch API configurations
     # TODO (ApostaC): Support dynamic reconfiguration of batch API
     # enable_batch_api: bool
@@ -105,6 +110,8 @@ class DynamicRouterConfig:
             session_key=args.session_key,
             # Logging Options
             callbacks=args.callbacks,
+            # Server configurations
+            timeout_keep_alive=args.timeout_keep_alive,
         )
 
     @staticmethod
