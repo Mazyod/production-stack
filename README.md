@@ -1,3 +1,35 @@
+# vLLM Production Stack (fork)
+
+## About this fork
+
+This is a lightweight fork of [vllm-project/production-stack](https://github.com/vllm-project/production-stack) with the following changes:
+
+- **Multi-stage Docker build**: Builder stage installs dependencies with uv, runtime stage is just `python:3.13-slim` with the venv copied over. Image size reduced from ~5 GB to ~294 MB by defaulting `INSTALL_OPTIONAL_DEP` to empty (no PyTorch/sentence-transformers/vLLM).
+- **Python 3.13**: Both builder and runtime stages use Python 3.13.
+- **Single-label hostname fix**: `validate_url` regex accepts Docker/K8s hostnames without dots (e.g., `http://vllm-worker:8000`). Mirrors [PR #737](https://github.com/vllm-project/production-stack/pull/737).
+- **Qwen rerank template**: Preprocesses `/v1/rerank` requests for `Qwen/Qwen3-Reranker-0.6B` with the required chat template before forwarding to the backend.
+- **`/pooling` route**: Proxies vLLM's `/pooling` endpoint (backend chosen by the request body's `model` field, same as `/v1/embeddings`). Needed for Jina Embeddings v4 multi-vector (ColBERT) output, which vLLM serves only on `/pooling`.
+- **Default port 8080**: Changed from 8001 to match the [vllm-project/router](https://github.com/vllm-project/router) default for easier future migration.
+- **numpy unpinned**: `>=1.26.4` instead of `==1.26.4` (no Python 3.13 wheels for 1.26.4).
+
+Pre-built images are published to Docker Hub, tagged to match upstream releases:
+
+```
+docker pull openimage/production-stack-router:v0.1.10
+```
+
+### Audio-enabled vLLM serving image
+
+The stock `vllm/vllm-openai` image ships **without** the audio extras, so `POST /v1/audio/transcriptions` fails at request time with `ImportError: Please install vllm[audio] for audio support` (surfaced to clients as a generic `400 Invalid or unsupported audio file`). This fork also publishes a drop-in replacement that installs the vLLM `audio` extra (`av`, `soundfile`, `soxr`, `scipy`, … — the set tracks the vLLM version), pinned to the exact vLLM build in the base image so nothing else changes:
+
+```
+docker pull openimage/vllm-openai-audio:v0.10.0
+```
+
+It tracks vLLM core releases (a separate cadence from the router), is built from `docker/Dockerfile.audio` by the [`build-vllm-audio`](.github/workflows/build-vllm-audio.yml) workflow, and keeps the upstream entrypoint — swap the image and Whisper/transcription endpoints just work.
+
+---
+
 # vLLM Production Stack: reference stack for production vLLM deployment
 
 | [**Blog**](https://lmcache.github.io) | [**Docs**](https://docs.vllm.ai/projects/production-stack) | [**Production-Stack Slack Channel**](https://communityinviter.com/apps/vllm-dev/join-vllm-developers-slack) | [**LMCache Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ) | [**Interest Form**](https://forms.gle/mQfQDUXbKfp2St1z7) |
