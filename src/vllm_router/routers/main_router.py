@@ -85,9 +85,61 @@ async def route_detokenize(request: Request, background_tasks: BackgroundTasks):
     return await route_general_request(request, "/detokenize", background_tasks)
 
 
+def apply_template(query: str, documents: list[str]) -> tuple[str, list[str]]:
+    instruction = "Given a web search query, retrieve relevant passages that answer the query"
+
+    prefix = '<|im_start|>system\\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\\n<|im_start|>user\\n'
+    suffix = "<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n"
+
+    query_template = "{prefix}<Instruct>: {instruction}\\n<Query>: {query}\\n"
+    document_template = "<Document>: {doc}{suffix}"
+
+    query = query_template.format(prefix=prefix, instruction=instruction, query=query)
+    documents = [document_template.format(doc=doc, suffix=suffix) for doc in documents]
+
+    return query, documents
+
+
 @main_router.post("/v1/rerank")
 async def route_v1_rerank(request: Request, background_tasks: BackgroundTasks):
-    return await route_general_request(request, "/v1/rerank", background_tasks)
+
+    payload = await request.json()
+
+    model = payload.get("model")
+    query = payload.get("query", "")
+    documents = payload.get("documents", "")
+
+    original_body = json.dumps(payload).encode("utf-8")
+
+    if model == "Qwen/Qwen3-Reranker-0.6B" and query and documents:
+        query, documents = apply_template(query, documents)
+        payload['query'] = query
+        payload['documents'] = documents
+        modified_body = json.dumps(payload).encode('utf-8')
+    else:
+        modified_body = original_body
+
+    new_scope = dict(request.scope)
+    raw_headers = [
+        (k, v)
+        for k, v in new_scope["headers"]
+        if k.lower() != b"content-length"
+    ]
+
+    raw_headers.append(
+        (b"content-length", str(len(modified_body)).encode("utf-8"))
+    )
+    new_scope["headers"] = raw_headers
+
+    async def receive() -> dict:
+        return {
+            "type": "http.request",
+            "body": modified_body,
+            "more_body": False
+        }
+
+    new_request = Request(new_scope, receive)
+    return await route_general_request(new_request, "/v1/rerank", background_tasks)
 
 
 @main_router.post("/rerank")
