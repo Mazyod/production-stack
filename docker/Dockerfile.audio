@@ -1,0 +1,22 @@
+# syntax=docker/dockerfile:1
+#
+# vllm-openai + audio extras.
+#
+# The stock vllm/vllm-openai image ships WITHOUT the audio decode deps, so
+# POST /v1/audio/transcriptions fails at request time with:
+#     ImportError: Please install vllm[audio] for audio support
+# and the client sees a generic 400 "Invalid or unsupported audio file".
+#
+# This image installs the vLLM `audio` extra (av/soundfile/soxr/scipy/... — the
+# exact set depends on the vLLM version), pinned to the EXACT vLLM build already
+# in the base image, so pip never reinstalls or swaps the vendored vLLM. WAV is
+# decoded by soundfile/libsndfile; PyAV (av) covers other container formats.
+#
+# Entrypoint is inherited unchanged, so this is a drop-in replacement for
+# vllm/vllm-openai.
+ARG BASE_TAG=latest
+FROM vllm/vllm-openai:${BASE_TAG}
+
+# `pip show` reads package metadata WITHOUT importing vllm, so this stays fast
+# and needs no GPU/CUDA at build time.
+RUN pip install --no-cache-dir "vllm[audio]==$(pip show vllm | awk '/^Version:/ {print $2}')"
