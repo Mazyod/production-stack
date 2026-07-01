@@ -197,7 +197,8 @@ async def show_models(request: Request):
     Raises:
         Exception: If there is an error in retrieving the endpoint information.
     """
-    endpoints = get_service_discovery().get_endpoint_info()
+    service_discovery = get_service_discovery()
+    endpoints = service_discovery.get_endpoint_info()
     existing_models = set()
     model_cards = []
 
@@ -228,6 +229,23 @@ async def show_models(request: Request):
                 )
             )
             existing_models.add(model_id)
+
+    # Append static aliases so callers can discover the alternate model names
+    # they are allowed to request (aliases only exist on static discovery).
+    aliases = getattr(service_discovery, "aliases", None)
+    if aliases:
+        for alias, canonical_model in aliases.items():
+            if alias in existing_models:
+                continue
+            model_cards.append(
+                ModelCard(
+                    id=alias,
+                    object="model",
+                    owned_by="vllm",
+                    root=canonical_model,
+                )
+            )
+            existing_models.add(alias)
 
     model_list = ModelList(data=model_cards)
     return JSONResponse(content=model_list.model_dump())
