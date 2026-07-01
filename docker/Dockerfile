@@ -1,30 +1,27 @@
-FROM python:3.12-slim
+# Multi-stage build: fat builder with uv, slim runtime with just the venv.
+
+# ── Builder ───────────────────────────────────────────────────
+FROM python:3.13-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir uv
 
 WORKDIR /app
 
-# hadolint ignore=DL3008
-RUN --mount=type=cache,target=/var/lib/apt --mount=type=cache,target=/var/cache/apt \
-    apt-get update && \
-    apt-get install -y --no-install-recommends git && \
-    rm -rf /var/lib/apt/lists/*
-
-# Copy the pyproject.toml and the git metadata first (leverage Docker layer caching)
 COPY pyproject.toml .
 COPY .git/ .git/
-
-# Copy the rest of the application code
 COPY src/ src/
 
-ARG INSTALL_OPTIONAL_DEP=semantic_cache,lmcache
-ENV INSTALL_OPTIONAL_DEP=${INSTALL_OPTIONAL_DEP}
-
-# Install dependencies (use cache, and delete after install, to speed up the build)
-RUN pip install --no-cache-dir uv && \
-    uv venv /opt/venv && \
+ARG INSTALL_OPTIONAL_DEP=
+RUN uv venv /opt/venv && \
     . /opt/venv/bin/activate && \
-    uv pip install --upgrade --no-cache-dir pip setuptools_scm && \
+    uv pip install --no-cache-dir setuptools_scm && \
     uv pip install --no-cache-dir .[$INSTALL_OPTIONAL_DEP]
 
-# Set the entrypoint
+# ── Runtime ───────────────────────────────────────────────────
+FROM python:3.13-slim
+
+COPY --from=builder /opt/venv /opt/venv
+
 ENTRYPOINT ["/opt/venv/bin/vllm-router"]
 CMD []
