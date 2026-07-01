@@ -1,0 +1,209 @@
+name: Build and Push vLLM-OpenAI (audio) Image
+
+on:
+  schedule:
+    # Mondays, 30 min after the router build so they don't contend for runners.
+    - cron: "30 6 * * 1"
+
+  workflow_dispatch:
+    inputs:
+      vllm_tag:
+        description: "Force a specific vllm/vllm-openai tag (e.g. v0.10.0)"
+        required: false
+        default: ""
+
+  push:
+    branches: [main]
+    paths:
+      - "docker/Dockerfile.audio"
+      - ".github/workflows/build-vllm-audio.yml"
+
+env:
+  IMAGE_NAME: docker.io/openimage/vllm-openai-audio
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Resolve the upstream vLLM release and decide whether to build
+  # ---------------------------------------------------------------------------
+  check-upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      vllm_tag: ${{ steps.resolve.outputs.vllm_tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      should_build: ${{ steps.resolve.outputs.should_build }}
+    steps:
+      - name: Resolve upstream vLLM tag
+        id: resolve
+        run: |
+          set -euo pipefail
+
+          TRIGGER="${{ github.event_name }}"
+          INPUT_TAG="${{ github.event.inputs.vllm_tag }}"
+
+          if [[ "$TRIGGER" == "workflow_dispatch" && -n "$INPUT_TAG" ]]; then
+            echo "Using manually supplied tag: $INPUT_TAG"
+            VLLM_TAG="$INPUT_TAG"
+          else
+            # Latest vLLM release; the vllm/vllm-openai docker tag matches it.
+            VLLM_TAG=$(curl -sf "https://api.github.com/repos/vllm-project/vllm/releases/latest" \
+              | jq -r '.tag_name // empty')
+
+            if [[ -z "$VLLM_TAG" ]]; then
+              echo "::error::Could not resolve the latest vLLM release tag"
+              exit 1
+            fi
+            echo "Latest vLLM release: $VLLM_TAG"
+          fi
+
+          # The base image must actually exist on Docker Hub for this tag,
+          # otherwise the build would fail with a confusing pull error.
+          BASE_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags/${VLLM_TAG}")
+          if [[ "$BASE_CODE" != "200" ]]; then
+            echo "::error::Base image vllm/vllm-openai:${VLLM_TAG} not found on Docker Hub (HTTP $BASE_CODE)"
+            exit 1
+          fi
+
+          # Strip leading v: v0.10.0 -> 0.10.0
+          VERSION="${VLLM_TAG#v}"
+          echo "Version: $VERSION"
+
+          if [[ "$TRIGGER" == "push" || ("$TRIGGER" == "workflow_dispatch" && -n "$INPUT_TAG") ]]; then
+            SHOULD_BUILD="true"
+          else
+            # Scheduled: skip if we already published this version.
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              "https://hub.docker.com/v2/repositories/openimage/vllm-openai-audio/tags/${VLLM_TAG}")
+
+            if [[ "$HTTP_CODE" == "200" ]]; then
+              echo "Image ${VLLM_TAG} already exists — skipping."
+              SHOULD_BUILD="false"
+            else
+              echo "Image ${VLLM_TAG} not found — will build."
+              SHOULD_BUILD="true"
+            fi
+          fi
+
+          echo "vllm_tag=$VLLM_TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+
+          echo ""
+          echo "========================================"
+          echo "  vLLM tag     : $VLLM_TAG"
+          echo "  Version      : $VERSION"
+          echo "  Should build : $SHOULD_BUILD"
+          echo "========================================"
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Build the audio-enabled image and push
+  # ---------------------------------------------------------------------------
+  build-and-push:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile.audio
+          # vllm/vllm-openai is published for linux/amd64 only.
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BASE_TAG=${{ needs.check-upstream.outputs.vllm_tag }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.vllm_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "### Build Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Base image:** \`vllm/vllm-openai:${{ needs.check-upstream.outputs.vllm_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag:** \`${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.vllm_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Verify the audio deps actually import (CPU-only, no GPU needed)
+  # ---------------------------------------------------------------------------
+  test:
+    needs: [check-upstream, build-and-push]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull the built image
+        run: |
+          IMAGE="${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.vllm_tag }}"
+          echo "Pulling $IMAGE ..."
+          docker pull "$IMAGE"
+
+      - name: Assert audio decode deps are present
+        run: |
+          # The whole point of this image: /v1/audio/transcriptions needs these.
+          # vLLM's audio path (vllm/multimodal/media/audio.py) guards `import av`
+          # and `import soundfile`; if either is missing it degrades to a
+          # PlaceholderModule and raises "install vllm[audio]". Importing both is
+          # pure CPU work — no model load, no GPU. (The base image ships
+          # `python3`, not a bare `python`.)
+          IMAGE="${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.vllm_tag }}"
+          docker run --rm --entrypoint python3 "$IMAGE" -c \
+            "import av, soundfile; print('audio deps OK: av', av.__version__, '| soundfile', soundfile.__version__)"
+
+  # ---------------------------------------------------------------------------
+  # Job 4: Tag as :latest after the import check passes
+  # ---------------------------------------------------------------------------
+  tag-latest:
+    needs: [check-upstream, build-and-push, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Tag image as latest
+        run: |
+          SOURCE="${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.vllm_tag }}"
+          TARGET="${{ env.IMAGE_NAME }}:latest"
+          echo "Tagging $SOURCE as $TARGET ..."
+          docker buildx imagetools create --tag "$TARGET" "$SOURCE"
+
+      - name: Summary
+        run: |
+          echo "### Release Complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.vllm_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${{ env.IMAGE_NAME }}:latest\`" >> "$GITHUB_STEP_SUMMARY"
