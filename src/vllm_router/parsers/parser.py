@@ -137,6 +137,19 @@ def parse_args():
         help="FastAPI root path for hosting under a subpath (e.g. /vllm).",
     )
     parser.add_argument(
+        "--timeout-keep-alive",
+        type=int,
+        default=5,
+        help="Seconds to keep an idle HTTP keep-alive connection open before "
+        "the server closes it (passed through to uvicorn). Raise this above "
+        "the connection-reuse window of whatever sits in front of the router "
+        "(e.g. a Caddy/nginx reverse proxy, whose upstream keep-alive is "
+        "often 1-2 minutes) so the front end does not reuse a connection the "
+        "router has already closed, which surfaces as a slow/failed first "
+        "request after a few seconds of idle. Default is 5 (uvicorn's "
+        "default); set 0 to disable the timeout.",
+    )
+    parser.add_argument(
         "--service-discovery",
         type=str,
         choices=["static", "k8s", "external-only"],
