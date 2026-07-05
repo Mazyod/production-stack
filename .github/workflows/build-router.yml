@@ -37,6 +37,11 @@ jobs:
     steps:
       - name: Resolve upstream tag
         id: resolve
+        env:
+          # Authenticate GitHub API calls: unauthenticated requests are capped at
+          # 60/hr per runner IP (shared across Actions), which intermittently 403s
+          # and makes `curl -sf` exit 22. The built-in token lifts this to 5000/hr.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -48,7 +53,12 @@ jobs:
             UPSTREAM_TAG="$INPUT_TAG"
           else
             # Query upstream tags via GitHub API
-            TAGS_JSON=$(curl -sf "https://api.github.com/repos/vllm-project/production-stack/tags?per_page=20")
+            TAGS_JSON=$(curl -sf \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              --retry 3 --retry-delay 2 \
+              "https://api.github.com/repos/vllm-project/production-stack/tags?per_page=20")
             UPSTREAM_TAG=$(echo "$TAGS_JSON" | jq -r '
               [ .[].name | select(startswith("vllm-stack-")) ] | first // empty
             ')
