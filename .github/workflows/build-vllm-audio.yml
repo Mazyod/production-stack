@@ -8,7 +8,11 @@ on:
   workflow_dispatch:
     inputs:
       vllm_tag:
-        description: "Force a specific vllm/vllm-openai tag (e.g. v0.10.0)"
+        description: "Force a specific vllm/vllm-openai base tag (e.g. v0.10.0, nightly)"
+        required: false
+        default: ""
+      publish_tags:
+        description: "Tags to publish under, space/comma-separated (default: the base tag). Does not move :latest."
         required: false
         default: ""
 
@@ -33,21 +37,35 @@ jobs:
       vllm_tag: ${{ steps.resolve.outputs.vllm_tag }}
       version: ${{ steps.resolve.outputs.version }}
       should_build: ${{ steps.resolve.outputs.should_build }}
+      promote_latest: ${{ steps.resolve.outputs.promote_latest }}
+      primary_tag: ${{ steps.resolve.outputs.primary_tag }}
+      image_refs: ${{ steps.resolve.outputs.image_refs }}
     steps:
       - name: Resolve upstream vLLM tag
         id: resolve
+        env:
+          # Authenticate GitHub API calls: unauthenticated requests are capped at
+          # 60/hr per runner IP (shared across Actions), which intermittently 403s
+          # and makes `curl -sf` exit 22. The built-in token lifts this to 5000/hr.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           TRIGGER="${{ github.event_name }}"
           INPUT_TAG="${{ github.event.inputs.vllm_tag }}"
+          INPUT_PUBLISH_TAGS="${{ github.event.inputs.publish_tags }}"
 
           if [[ "$TRIGGER" == "workflow_dispatch" && -n "$INPUT_TAG" ]]; then
             echo "Using manually supplied tag: $INPUT_TAG"
             VLLM_TAG="$INPUT_TAG"
           else
             # Latest vLLM release; the vllm/vllm-openai docker tag matches it.
-            VLLM_TAG=$(curl -sf "https://api.github.com/repos/vllm-project/vllm/releases/latest" \
+            VLLM_TAG=$(curl -sf \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              --retry 3 --retry-delay 2 \
+              "https://api.github.com/repos/vllm-project/vllm/releases/latest" \
               | jq -r '.tag_name // empty')
 
             if [[ -z "$VLLM_TAG" ]]; then
@@ -86,15 +104,48 @@ jobs:
             fi
           fi
 
+          # Only auto-resolved latest-release builds move the :latest tag. A
+          # forced-tag dispatch (e.g. vllm_tag=nightly or an older release) is a
+          # one-off and must NOT clobber :latest.
+          if [[ "$TRIGGER" == "workflow_dispatch" && -n "$INPUT_TAG" ]]; then
+            PROMOTE_LATEST="false"
+          else
+            PROMOTE_LATEST="true"
+          fi
+
+          # Published tags default to the base tag; a dispatch may override them
+          # (e.g. publish one nightly build under both `nightly` and a dated
+          # snapshot). The primary tag drives the pull/test/latest steps.
+          if [[ "$TRIGGER" == "workflow_dispatch" && -n "$INPUT_PUBLISH_TAGS" ]]; then
+            PUBLISH_TAGS=$(echo "$INPUT_PUBLISH_TAGS" | tr ',' ' ' | xargs)
+          else
+            PUBLISH_TAGS="$VLLM_TAG"
+          fi
+          PRIMARY_TAG="${PUBLISH_TAGS%% *}"
+
           echo "vllm_tag=$VLLM_TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+          echo "promote_latest=$PROMOTE_LATEST" >> "$GITHUB_OUTPUT"
+          echo "primary_tag=$PRIMARY_TAG" >> "$GITHUB_OUTPUT"
+
+          # Multi-line output: one fully-qualified image ref per published tag,
+          # consumed directly by docker/build-push-action's `tags:` field.
+          {
+            echo "image_refs<<__IMAGE_REFS__"
+            for t in $PUBLISH_TAGS; do
+              echo "${IMAGE_NAME}:${t}"
+            done
+            echo "__IMAGE_REFS__"
+          } >> "$GITHUB_OUTPUT"
 
           echo ""
           echo "========================================"
-          echo "  vLLM tag     : $VLLM_TAG"
-          echo "  Version      : $VERSION"
-          echo "  Should build : $SHOULD_BUILD"
+          echo "  vLLM base tag  : $VLLM_TAG"
+          echo "  Version        : $VERSION"
+          echo "  Should build   : $SHOULD_BUILD"
+          echo "  Promote latest : $PROMOTE_LATEST"
+          echo "  Publish tags   : $PUBLISH_TAGS"
           echo "========================================"
 
   # ---------------------------------------------------------------------------
@@ -130,8 +181,7 @@ jobs:
           push: true
           build-args: |
             BASE_TAG=${{ needs.check-upstream.outputs.vllm_tag }}
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.vllm_tag }}
+          tags: ${{ needs.check-upstream.outputs.image_refs }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -140,7 +190,10 @@ jobs:
           echo "### Build Complete" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Base image:** \`vllm/vllm-openai:${{ needs.check-upstream.outputs.vllm_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Tag:** \`${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.vllm_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tags:**" >> "$GITHUB_STEP_SUMMARY"
+          while IFS= read -r ref; do
+            [[ -n "$ref" ]] && echo "  - \`$ref\`" >> "$GITHUB_STEP_SUMMARY"
+          done <<< "${{ needs.check-upstream.outputs.image_refs }}"
           echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
@@ -160,7 +213,7 @@ jobs:
 
       - name: Pull the built image
         run: |
-          IMAGE="${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.vllm_tag }}"
+          IMAGE="${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.primary_tag }}"
           echo "Pulling $IMAGE ..."
           docker pull "$IMAGE"
 
@@ -172,7 +225,7 @@ jobs:
           # PlaceholderModule and raises "install vllm[audio]". Importing both is
           # pure CPU work — no model load, no GPU. (The base image ships
           # `python3`, not a bare `python`.)
-          IMAGE="${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.vllm_tag }}"
+          IMAGE="${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.primary_tag }}"
           docker run --rm --entrypoint python3 "$IMAGE" -c \
             "import av, soundfile; print('audio deps OK: av', av.__version__, '| soundfile', soundfile.__version__)"
 
@@ -181,6 +234,7 @@ jobs:
   # ---------------------------------------------------------------------------
   tag-latest:
     needs: [check-upstream, build-and-push, test]
+    if: needs.check-upstream.outputs.promote_latest == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -196,7 +250,7 @@ jobs:
 
       - name: Tag image as latest
         run: |
-          SOURCE="${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.vllm_tag }}"
+          SOURCE="${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.primary_tag }}"
           TARGET="${{ env.IMAGE_NAME }}:latest"
           echo "Tagging $SOURCE as $TARGET ..."
           docker buildx imagetools create --tag "$TARGET" "$SOURCE"
@@ -205,5 +259,5 @@ jobs:
         run: |
           echo "### Release Complete" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- \`${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.vllm_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- \`${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.primary_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- \`${{ env.IMAGE_NAME }}:latest\`" >> "$GITHUB_STEP_SUMMARY"
