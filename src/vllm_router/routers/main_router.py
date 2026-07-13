@@ -33,16 +33,6 @@ from vllm_router.services.request_service.request import (
 from vllm_router.stats.engine_stats import get_engine_stats_scraper
 from vllm_router.version import __version__
 
-try:
-    # Semantic cache integration
-    from vllm_router.experimental.semantic_cache_integration import (
-        check_semantic_cache,
-    )
-
-    semantic_cache_available = True
-except ImportError:
-    semantic_cache_available = False
-
 main_router = APIRouter()
 
 logger = init_logger(__name__)
@@ -50,16 +40,6 @@ logger = init_logger(__name__)
 
 @main_router.post("/v1/chat/completions")
 async def route_chat_completion(request: Request, background_tasks: BackgroundTasks):
-    if semantic_cache_available:
-        # Check if the request can be served from the semantic cache
-        logger.debug("Received chat completion request, checking semantic cache")
-        cache_response = await check_semantic_cache(request=request)
-
-        if cache_response:
-            logger.info("Serving response from semantic cache")
-            return cache_response
-
-    logger.debug("No cache hit, forwarding request to backend")
     return await route_general_request(
         request, "/v1/chat/completions", background_tasks
     )
@@ -91,7 +71,9 @@ async def route_detokenize(request: Request, background_tasks: BackgroundTasks):
 
 
 def apply_template(query: str, documents: list[str]) -> tuple[str, list[str]]:
-    instruction = "Given a web search query, retrieve relevant passages that answer the query"
+    instruction = (
+        "Given a web search query, retrieve relevant passages that answer the query"
+    )
 
     prefix = '<|im_start|>system\\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\\n<|im_start|>user\\n'
     suffix = "<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n"
@@ -118,30 +100,22 @@ async def route_v1_rerank(request: Request, background_tasks: BackgroundTasks):
 
     if model == "Qwen/Qwen3-Reranker-0.6B" and query and documents:
         query, documents = apply_template(query, documents)
-        payload['query'] = query
-        payload['documents'] = documents
-        modified_body = json.dumps(payload).encode('utf-8')
+        payload["query"] = query
+        payload["documents"] = documents
+        modified_body = json.dumps(payload).encode("utf-8")
     else:
         modified_body = original_body
 
     new_scope = dict(request.scope)
     raw_headers = [
-        (k, v)
-        for k, v in new_scope["headers"]
-        if k.lower() != b"content-length"
+        (k, v) for k, v in new_scope["headers"] if k.lower() != b"content-length"
     ]
 
-    raw_headers.append(
-        (b"content-length", str(len(modified_body)).encode("utf-8"))
-    )
+    raw_headers.append((b"content-length", str(len(modified_body)).encode("utf-8")))
     new_scope["headers"] = raw_headers
 
     async def receive() -> dict:
-        return {
-            "type": "http.request",
-            "body": modified_body,
-            "more_body": False
-        }
+        return {"type": "http.request", "body": modified_body, "more_body": False}
 
     new_request = Request(new_scope, receive)
     return await route_general_request(new_request, "/v1/rerank", background_tasks)

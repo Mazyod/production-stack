@@ -178,23 +178,18 @@ async def store_in_semantic_cache(
             logger.error(traceback.format_exc())
 
 
-async def check_semantic_cache(request: Request) -> Optional[JSONResponse]:
-    """
-    Check if a request can be served from the semantic cache.
-
-    Args:
-        request: The FastAPI request object
-
-    Returns:
-        A JSONResponse if the request can be served from cache, None otherwise
-    """
+async def check_semantic_cache(
+    request: Request,
+    *,
+    request_json: dict | None = None,
+) -> Optional[JSONResponse]:
+    """Return a cache hit using post-rewrite JSON when the router supplies it."""
     # Check if semantic cache is enabled via feature gates
     if not is_semantic_cache_enabled():
         logger.debug("Semantic cache is not enabled, skipping cache check")
         return None
 
-    # Get the request body
-    body = await request.json()
+    body = request_json if request_json is not None else await request.json()
     logger.info("Checking semantic cache for potential cache hit")
 
     # Check if semantic cache is initialized

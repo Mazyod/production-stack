@@ -48,6 +48,7 @@ from vllm_router.utils import (
 try:
     # Semantic cache integration
     from vllm_router.experimental.semantic_cache_integration import (
+        check_semantic_cache,
         store_in_semantic_cache,
     )
 
@@ -290,13 +291,14 @@ def _build_backend_request_headers(
 # TODO: (Brian) check if request is json beforehand
 async def process_request(
     request: Request,
-    body,
-    backend_url,
-    request_id,
-    endpoint,
+    body: bytes,
+    backend_url: str,
+    request_id: str,
+    endpoint: str,
     background_tasks: BackgroundTasks,
-    debug_request=None,
     parent_span_context=None,
+    *,
+    skip_semantic_cache: bool = False,
 ):
     """
     Process a request by sending it to the chosen backend.
@@ -307,8 +309,6 @@ async def process_request(
         backend_url: The URL of the backend to send the request to.
         request_id: A unique identifier for the request.
         endpoint: The endpoint to send the request to on the backend.
-        debug_request: The original request object from the client, used for
-            optional debug logging.
         parent_span_context: OpenTelemetry context from parent span for trace propagation.
 
     Yields:
@@ -423,7 +423,7 @@ async def process_request(
 
         # Store in semantic cache if applicable
         # Use the full response for non-streaming requests, or the last chunk for streaming
-        if request.app.state.semantic_cache_available:
+        if request.app.state.semantic_cache_available and not skip_semantic_cache:
             cache_chunk = bytes(full_response) if not is_streaming else chunk
             await store_in_semantic_cache(
                 endpoint=endpoint, method=request.method, body=body, chunk=cache_chunk
@@ -542,6 +542,26 @@ async def route_general_request(
             raise HTTPException(
                 status_code=400, detail="Request body is not JSON parsable."
             )
+
+    candidate_contract = (
+        extract_output_contract(request_json)
+        if getattr(request.app.state, "structured_output_repair_enabled", False)
+        else OutputContract()
+    )
+    skip_semantic_cache = candidate_contract.engaged
+
+    if (
+        endpoint == "/v1/chat/completions"
+        and semantic_cache_available
+        and request.app.state.semantic_cache_available
+        and not skip_semantic_cache
+    ):
+        cache_response = await check_semantic_cache(
+            request=request,
+            request_json=request_json,
+        )
+        if cache_response:
+            return cache_response
 
     service_discovery = get_service_discovery()
     endpoints = service_discovery.get_endpoint_info()
@@ -699,6 +719,7 @@ async def route_general_request(
                 endpoint,
                 background_tasks,
                 parent_span_context=span_context,
+                skip_semantic_cache=skip_semantic_cache,
             )
             headers, status = await anext(stream_generator)
             media_type = headers.get("content-type", "text/event-stream")
@@ -752,7 +773,6 @@ async def route_general_request(
             media_type=media_type,
         )
 
-    candidate_contract = extract_output_contract(request_json)
     contract = candidate_contract if 200 <= status < 300 else OutputContract()
 
     if not contract.engaged:
