@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 import os
 import time
@@ -23,7 +24,7 @@ import aiohttp
 # --- Request Processing & Routing ---
 from aiohttp import FormData
 from fastapi import BackgroundTasks, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from requests import JSONDecodeError
 
 from vllm_router.log import init_logger
@@ -75,6 +76,18 @@ from vllm_router.services.metrics_service import (
     output_tokens_total,
     request_errors_total,
     request_latency_seconds,
+    structured_output_garbage_prefix_bytes,
+    structured_output_repairs_total,
+    structured_output_schema_rejections_total,
+)
+from vllm_router.services.structured_output.contract import (
+    OutputContract,
+    extract_output_contract,
+)
+from vllm_router.services.structured_output.transform import (
+    RepairTelemetry,
+    StreamRepairer,
+    transform_response_body,
 )
 
 logger = init_logger(__name__)
@@ -97,6 +110,60 @@ _HEADERS_TO_STRIP_FROM_RESPONSE = {
     "transfer-encoding",
     "connection",
 }
+
+_REPAIR_STATUSES = frozenset(
+    {
+        "clean",
+        "repaired",
+        "incomplete",
+        "ambiguous",
+        "unknown",
+        "poisoned",
+        "no_terminal",
+        "capped",
+        "timeout",
+        "error",
+    }
+)
+_REPAIR_MODES = frozenset({"none", "code_fence", "extra_brace", "dup_prefix", "other"})
+_REPAIRED_STATUS = "repaired"
+_UNKNOWN_STATUS = "unknown"
+_OTHER_MODE = "other"
+_NON_DISCRIMINATING_REASON = "non_discriminating"
+
+
+def _record_repair_metrics(
+    telemetry,
+    requested_model,
+    *,
+    rejected_non_discriminating=False,
+) -> None:
+    """Metrics are fail-safe and receive no raw model output."""
+    try:
+        if rejected_non_discriminating:
+            structured_output_schema_rejections_total.labels(
+                model=requested_model,
+                reason=_NON_DISCRIMINATING_REASON,
+            ).inc()
+        for event in telemetry:
+            status = (
+                event.status if event.status in _REPAIR_STATUSES else _UNKNOWN_STATUS
+            )
+            mode = event.mode if event.mode in _REPAIR_MODES else _OTHER_MODE
+            structured_output_repairs_total.labels(
+                model=requested_model,
+                status=status,
+                mode=mode,
+            ).inc()
+            if status == _REPAIRED_STATUS:
+                structured_output_garbage_prefix_bytes.labels(
+                    model=requested_model
+                ).observe(event.garbage_prefix_bytes)
+    except Exception:  # noqa: BLE001 - telemetry must never affect a response
+        try:
+            logger.warning("failed to record structured-output repair metrics")
+        except Exception:  # noqa: BLE001 - logging must also remain fail-safe
+            pass
 
 
 async def process_external_provider_request(
@@ -664,12 +731,171 @@ async def route_general_request(
             async for chunk in stream_generator:
                 yield chunk
             end_span(span, status_code=status) if tracing_active else None
-        except Exception as e:
-            end_span(span, error=e, status_code=500) if tracing_active else None
+        except BaseException as e:
+            if tracing_active:
+                if isinstance(e, Exception):
+                    end_span(span, error=e, status_code=500)
+                else:
+                    end_span(span, status_code=499)
             raise
+        finally:
+            try:
+                await stream_generator.aclose()
+            except BaseException:
+                pass
+
+    if not getattr(request.app.state, "structured_output_repair_enabled", False):
+        return StreamingResponse(
+            traced_stream(),
+            status_code=status,
+            headers=headers_dict,
+            media_type=media_type,
+        )
+
+    candidate_contract = extract_output_contract(request_json)
+    contract = candidate_contract if 200 <= status < 300 else OutputContract()
+
+    if not contract.engaged:
+        _record_repair_metrics(
+            [],
+            requested_model,
+            rejected_non_discriminating=(
+                200 <= status < 300 and candidate_contract.rejected_non_discriminating
+            ),
+        )
+        return StreamingResponse(
+            traced_stream(),
+            status_code=status,
+            headers=headers_dict,
+            media_type=media_type,
+        )
+
+    if not request_json.get("stream", False):
+        body = bytearray()
+        try:
+            async for chunk in traced_stream():
+                body.extend(chunk)
+        except Exception as exc:
+
+            async def replay_then_raise(retained=bytes(body), error=exc):
+                if retained:
+                    yield retained
+                raise error
+
+            return StreamingResponse(
+                replay_then_raise(),
+                status_code=status,
+                headers=headers_dict,
+                media_type=media_type,
+            )
+
+        new_body, telemetry = transform_response_body(bytes(body), contract)
+        _record_repair_metrics(telemetry, requested_model)
+        # Response computes content-length itself; headers_dict already had it stripped.
+        return Response(
+            content=new_body,
+            status_code=status,
+            headers=headers_dict,
+            media_type=media_type,
+        )
+
+    max_bytes = getattr(
+        request.app.state, "structured_output_repair_max_bytes", 1_048_576
+    )
+    max_seconds = getattr(
+        request.app.state, "structured_output_repair_max_seconds", 30.0
+    )
+
+    async def repaired_stream():
+        repairer = StreamRepairer(
+            contract,
+            max_buffered_bytes=max_bytes,
+            max_buffer_seconds=max_seconds,
+        )
+        iterator = traced_stream().__aiter__()
+        read = None
+        finalized = False
+        try:
+            while True:
+                seconds_remaining = repairer.seconds_remaining
+                if seconds_remaining is None:
+                    try:
+                        chunk = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        break
+                else:
+                    read = asyncio.ensure_future(iterator.__anext__())
+                    try:
+                        chunk = await asyncio.wait_for(
+                            asyncio.shield(read),
+                            timeout=seconds_remaining,
+                        )
+                    except asyncio.TimeoutError:
+                        # shield() leaves the backend read alive. Replay what was
+                        # withheld, disable repair, then await that same read.
+                        tail = repairer.abort()
+                        repairer.telemetry.append(
+                            RepairTelemetry("timeout", "other", 0)
+                        )
+                        finalized = True
+                        if tail:
+                            yield tail
+                        try:
+                            chunk = await read
+                        except StopAsyncIteration:
+                            read = None
+                            break
+                    except StopAsyncIteration:
+                        read = None
+                        break
+
+                read = None
+                out = repairer.feed(chunk)
+                if out:
+                    yield out
+            if not finalized:
+                tail = repairer.flush()
+                finalized = True
+                if tail:
+                    yield tail
+        except asyncio.CancelledError:
+            # A server-side StreamingResponse cancellation can still consume one
+            # final yielded value before the cancellation is re-raised.
+            tail = b"" if finalized else repairer.abort()
+            finalized = True
+            if tail:
+                yield tail
+            raise
+        except Exception:
+            # Give the client back whatever we withheld, then let the error surface.
+            if finalized:
+                tail = b""
+            else:
+                tail = repairer.abort()
+                repairer.telemetry.append(RepairTelemetry("error", "other", 0))
+            finalized = True
+            if tail:
+                yield tail
+            raise
+        finally:
+            # GeneratorExit and cancellation do not derive from Exception. Finalize
+            # synchronously here so no retained bytes survive an abandoned stream.
+            if not finalized:
+                repairer.abort()
+            if read is not None and not read.done():
+                read.cancel()
+                try:
+                    await read
+                except BaseException:
+                    pass
+            try:
+                await iterator.aclose()
+            except BaseException:
+                pass
+            _record_repair_metrics(repairer.telemetry, requested_model)
 
     return StreamingResponse(
-        traced_stream(),
+        repaired_stream(),
         status_code=status,
         headers=headers_dict,
         media_type=media_type,
