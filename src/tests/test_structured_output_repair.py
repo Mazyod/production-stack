@@ -3,9 +3,9 @@ import json
 import jsonschema
 import pytest
 
-from repair import (
+from vllm_router.services.structured_output.json_prefix import is_valid_json_prefix
+from vllm_router.services.structured_output.repair import (
     _compiled_validator,
-    is_valid_json_prefix,
     repair,
     repair_tool_arguments,
 )
