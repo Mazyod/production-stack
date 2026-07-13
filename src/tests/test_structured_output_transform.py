@@ -759,3 +759,75 @@ def test_later_choice_can_start_after_first_choice_finishes():
     assert json.loads(contents_by_index[0]) == {"summary": "first"}
     assert json.loads(contents_by_index[1]) == {"summary": "second"}
     assert [item.status for item in r.telemetry] == ["repaired", "repaired"]
+
+
+def test_repair_increments_counter():
+    from vllm_router.services.metrics_service import structured_output_repairs_total
+
+    def _value():
+        for metric in structured_output_repairs_total.collect():
+            for sample in metric.samples:
+                if sample.labels == {
+                    "model": "m",
+                    "status": "repaired",
+                    "mode": "extra_brace",
+                }:
+                    return sample.value
+        return 0.0
+
+    before = _value()
+    structured_output_repairs_total.labels(
+        model="m", status="repaired", mode="extra_brace"
+    ).inc()
+    assert _value() == before + 1
+
+
+def test_repair_counter_accepts_every_telemetry_status():
+    from vllm_router.services.metrics_service import structured_output_repairs_total
+
+    statuses = {
+        "clean",
+        "repaired",
+        "incomplete",
+        "ambiguous",
+        "unknown",
+        "poisoned",
+        "no_terminal",
+        "capped",
+        "timeout",
+        "error",
+    }
+
+    for status in statuses:
+        structured_output_repairs_total.labels(
+            model="all-statuses", status=status, mode="other"
+        ).inc()
+
+    observed = {
+        sample.labels["status"]
+        for metric in structured_output_repairs_total.collect()
+        for sample in metric.samples
+        if sample.name == "vllm:structured_output_repairs_total"
+        and sample.labels.get("model") == "all-statuses"
+        and sample.labels.get("mode") == "other"
+    }
+    assert observed == statuses
+
+
+def test_non_discriminating_rejection_counter_has_bounded_labels():
+    from vllm_router.services.metrics_service import (
+        structured_output_schema_rejections_total,
+    )
+
+    labels = {"model": "m", "reason": "non_discriminating"}
+
+    def _value():
+        for metric in structured_output_schema_rejections_total.collect():
+            for sample in metric.samples:
+                if sample.labels == labels:
+                    return sample.value
+        return 0.0
+
+    before = _value()
+    structured_output_schema_rejections_total.labels(**labels).inc()
+    assert _value() == before + 1

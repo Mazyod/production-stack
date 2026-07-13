@@ -69,3 +69,22 @@ request_latency_seconds = Histogram(
     ["server", "model", "status"],
     buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0),
 )
+
+structured_output_repairs_total = Counter(
+    "vllm:structured_output_repairs_total",
+    "Structured-output boundary repair outcomes",
+    ["model", "status", "mode"],
+)
+
+structured_output_garbage_prefix_bytes = Histogram(
+    "vllm:structured_output_garbage_prefix_bytes",
+    "Size of the corrupt prefix stripped from a structured output",
+    ["model"],
+    buckets=(1, 2, 4, 8, 16, 32, 64, 128, 256),
+)
+
+structured_output_schema_rejections_total = Counter(
+    "vllm:structured_output_schema_rejections_total",
+    "Structured-output schemas rejected at the engagement boundary",
+    ["model", "reason"],
+)
