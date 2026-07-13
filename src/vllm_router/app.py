@@ -363,6 +363,13 @@ def initialize_all(app: FastAPI, args):
     app.state.request_stats_monitor = get_request_stats_monitor()
     app.state.router = get_routing_logic()
     app.state.request_rewriter = get_request_rewriter()
+    app.state.structured_output_repair_enabled = args.enable_structured_output_repair
+    app.state.structured_output_repair_max_bytes = (
+        args.structured_output_repair_max_bytes
+    )
+    app.state.structured_output_repair_max_seconds = (
+        args.structured_output_repair_max_seconds
+    )
 
 
 app = FastAPI(lifespan=lifespan)

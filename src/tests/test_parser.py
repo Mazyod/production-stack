@@ -259,3 +259,32 @@ def test_parse_args_timeout_keep_alive_accepts_override(
     )
     args = parser.parse_args()
     assert args.timeout_keep_alive == 120
+
+
+def test_structured_output_repair_flag_and_caps(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "router",
+            "--port",
+            "8080",
+            "--service-discovery",
+            "static",
+            "--static-backends",
+            "http://a",
+            "--static-models",
+            "m",
+            "--routing-logic",
+            "roundrobin",
+            "--enable-structured-output-repair",
+            "--structured-output-repair-max-bytes",
+            "2048",
+            "--structured-output-repair-max-seconds",
+            "12.5",
+        ],
+    )
+    args = parser.parse_args()
+    assert args.enable_structured_output_repair is True
+    assert args.structured_output_repair_max_bytes == 2048
+    assert args.structured_output_repair_max_seconds == 12.5

@@ -301,6 +301,23 @@ def parse_args():
         help="Enable the batch API for processing files.",
     )
     parser.add_argument(
+        "--enable-structured-output-repair",
+        action="store_true",
+        help="Repair grammar-produced JSON corrupted at the reasoning/answer boundary (see docs/superpowers/specs/2026-07-13-structured-output-boundary-repair-design.md).",
+    )
+    parser.add_argument(
+        "--structured-output-repair-max-bytes",
+        type=int,
+        default=1048576,
+        help="Max bytes buffered per request while repairing structured output. On breach, the response is passed through unchanged.",
+    )
+    parser.add_argument(
+        "--structured-output-repair-max-seconds",
+        type=float,
+        default=30.0,
+        help="Max seconds content may be withheld while repairing structured output. On breach, retained bytes are replayed and repair is disabled.",
+    )
+    parser.add_argument(
         "--file-storage-class",
         type=str,
         default="local_file",
