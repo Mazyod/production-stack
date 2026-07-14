@@ -318,6 +318,33 @@ def parse_args():
         help="Max seconds content may be withheld while repairing structured output. On breach, retained bytes are replayed and repair is disabled.",
     )
     parser.add_argument(
+        "--structured-output-repair-capture-dir",
+        type=str,
+        default=None,
+        help="Router-owned 0700 directory for sampled, redacted repair diagnostics.",
+    )
+    parser.add_argument(
+        "--structured-output-repair-capture-sample-rate",
+        type=float,
+        default=0.01,
+        help="Fraction of ambiguous/unknown repair outcomes captured.",
+    )
+    parser.add_argument(
+        "--structured-output-repair-capture-max-bytes",
+        type=int,
+        default=4096,
+        help="Maximum UTF-8 bytes in each redacted output excerpt.",
+    )
+    parser.add_argument(
+        "--structured-output-repair-capture-retention-days",
+        type=int,
+        default=7,
+        help=(
+            "Days to retain structured-output diagnostic capture files; the sink "
+            "writes at most 64 MiB total across all retained capture files."
+        ),
+    )
+    parser.add_argument(
         "--file-storage-class",
         type=str,
         default="local_file",

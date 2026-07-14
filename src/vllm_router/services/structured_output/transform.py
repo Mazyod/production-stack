@@ -18,6 +18,8 @@ from vllm_router.services.structured_output.sse import SSEEvent, SSEParser
 
 logger = logging.getLogger(__name__)
 
+CaptureCallback = Callable[[str, "RepairTelemetry"], None]
+
 
 @dataclass(frozen=True)
 class RepairTelemetry:
@@ -40,6 +42,22 @@ def _telemetry(result: RepairResult) -> RepairTelemetry:
         mode=result.mode,
         garbage_prefix_bytes=len(result.garbage_prefix.encode("utf-8")),
     )
+
+
+def _capture_refusal(
+    callback: CaptureCallback | None,
+    content: str,
+    result: RepairResult,
+) -> None:
+    if callback is None or result.status not in {"ambiguous", "unknown"}:
+        return
+    try:
+        callback(content, _telemetry(result))
+    except Exception:  # noqa: BLE001 - diagnostics never affect output
+        try:
+            logger.warning("structured-output diagnostic capture failed")
+        except Exception:  # noqa: BLE001 - logging must not affect output
+            pass
 
 
 def _warn_transform_failure() -> None:
@@ -77,18 +95,26 @@ def _repair_choice(choice: dict, contract: OutputContract) -> RepairResult | Non
 
 
 def transform_response_body(
-    body: bytes, contract: OutputContract
+    body: bytes,
+    contract: OutputContract,
+    *,
+    capture_callback: CaptureCallback | None = None,
 ) -> tuple[bytes, list[RepairTelemetry]]:
     """Contain every transform exception, including RecursionError."""
     try:
-        return _transform_response_body(body, contract)
+        return _transform_response_body(
+            body, contract, capture_callback=capture_callback
+        )
     except Exception:  # noqa: BLE001 - the transform is an availability boundary
         _warn_transform_failure()
         return body, []
 
 
 def _transform_response_body(
-    body: bytes, contract: OutputContract
+    body: bytes,
+    contract: OutputContract,
+    *,
+    capture_callback: CaptureCallback | None = None,
 ) -> tuple[bytes, list[RepairTelemetry]]:
     if not contract.engaged:
         return body, []
@@ -111,6 +137,11 @@ def _transform_response_body(
             result = _repair_choice(choice, contract)
             if result is None:
                 continue
+            _capture_refusal(
+                capture_callback,
+                choice["message"]["content"],
+                result,
+            )
             telemetry.append(_telemetry(result))
             if result.status == "repaired":
                 choice["message"]["content"] = result.text
@@ -146,11 +177,14 @@ class StreamRepairer:
         max_buffered_bytes: int = _MAX_BUFFERED_BYTES,
         max_buffer_seconds: float = _MAX_BUFFER_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        *,
+        capture_callback: CaptureCallback | None = None,
     ) -> None:
         self._contract = contract
         self._max_buffered_bytes = max_buffered_bytes
         self._max_buffer_seconds = max_buffer_seconds
         self._clock = clock
+        self._capture_callback = capture_callback
         self._parser = SSEParser()
         self._buffering = False
         self._disabled = not (contract.engaged and contract.content_schema is not None)
@@ -273,11 +307,13 @@ class StreamRepairer:
         repaired: dict[int, str] = {}
         staged_telemetry: list[RepairTelemetry] = []
         for index, parts in self._content.items():
+            content = "".join(parts)
             result = repair(
-                "".join(parts),
+                content,
                 self._contract.content_schema,
                 finish_reason=self._finish[index],
             )
+            _capture_refusal(self._capture_callback, content, result)
             staged_telemetry.append(_telemetry(result))
             if result.status == "repaired":
                 repaired[index] = result.text

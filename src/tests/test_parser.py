@@ -288,3 +288,7 @@ def test_structured_output_repair_flag_and_caps(monkeypatch):
     assert args.enable_structured_output_repair is True
     assert args.structured_output_repair_max_bytes == 2048
     assert args.structured_output_repair_max_seconds == 12.5
+    assert args.structured_output_repair_capture_dir is None
+    assert args.structured_output_repair_capture_sample_rate == 0.01
+    assert args.structured_output_repair_capture_max_bytes == 4096
+    assert args.structured_output_repair_capture_retention_days == 7

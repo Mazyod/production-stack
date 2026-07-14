@@ -48,6 +48,10 @@ from vllm_router.services.files_service import initialize_storage
 from vllm_router.services.request_service.rewriter import (
     get_request_rewriter,
 )
+from vllm_router.services.structured_output.capture import (
+    CapturePolicy,
+    SecureJSONLCaptureSink,
+)
 from vllm_router.stats.engine_stats import (
     get_engine_stats_scraper,
     initialize_engine_stats_scraper,
@@ -370,6 +374,18 @@ def initialize_all(app: FastAPI, args):
     app.state.structured_output_repair_max_seconds = (
         args.structured_output_repair_max_seconds
     )
+    capture_directory = args.structured_output_repair_capture_dir
+    if not args.enable_structured_output_repair or capture_directory is None:
+        app.state.structured_output_repair_capture_sink = None
+    else:
+        app.state.structured_output_repair_capture_sink = SecureJSONLCaptureSink(
+            capture_directory,
+            CapturePolicy(
+                sample_rate=args.structured_output_repair_capture_sample_rate,
+                max_bytes=args.structured_output_repair_capture_max_bytes,
+                retention_days=args.structured_output_repair_capture_retention_days,
+            ),
+        )
 
 
 app = FastAPI(lifespan=lifespan)

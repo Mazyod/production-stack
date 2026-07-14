@@ -831,3 +831,41 @@ def test_non_discriminating_rejection_counter_has_bounded_labels():
     before = _value()
     structured_output_schema_rejections_total.labels(**labels).inc()
     assert _value() == before + 1
+
+
+def test_non_streaming_ambiguous_is_offered_to_capture_callback():
+    content = '{"summary": {"summary": "x"}'
+    body = _body(content)
+    captured = []
+    out, telemetry = transform_response_body(
+        body,
+        CONTRACT,
+        capture_callback=lambda raw, event: captured.append((raw, event)),
+    )
+    assert out is body
+    assert telemetry[0].status == "ambiguous"
+    assert captured == [(content, telemetry[0])]
+
+
+def test_raising_capture_callback_is_fail_safe():
+    body = _body('{"summary": {"summary": "x"}')
+
+    def explode(raw, event):
+        raise RuntimeError("sink unavailable")
+
+    out, telemetry = transform_response_body(body, CONTRACT, capture_callback=explode)
+    assert out is body
+    assert telemetry[0].status == "ambiguous"
+
+
+def test_streaming_unknown_is_offered_to_capture_callback():
+    captured = []
+    repairer = StreamRepairer(
+        CONTRACT,
+        capture_callback=lambda raw, event: captured.append((raw, event)),
+    )
+    frame = _chunk({"content": "not json"}, finish_reason="stop")
+    assert repairer.feed(frame) + repairer.flush() == frame
+    assert len(captured) == 1
+    assert captured[0][0] == "not json"
+    assert captured[0][1].status == "unknown"

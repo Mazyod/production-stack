@@ -790,6 +790,18 @@ async def route_general_request(
             media_type=media_type,
         )
 
+    capture_sink = getattr(
+        request.app.state, "structured_output_repair_capture_sink", None
+    )
+
+    def capture_callback(content, event):
+        if capture_sink is not None:
+            capture_sink.capture(
+                model=requested_model,
+                output=content,
+                telemetry=event,
+            )
+
     if not request_json.get("stream", False):
         body = bytearray()
         try:
@@ -809,7 +821,9 @@ async def route_general_request(
                 media_type=media_type,
             )
 
-        new_body, telemetry = transform_response_body(bytes(body), contract)
+        new_body, telemetry = transform_response_body(
+            bytes(body), contract, capture_callback=capture_callback
+        )
         _record_repair_metrics(telemetry, requested_model)
         # Response computes content-length itself; headers_dict already had it stripped.
         return Response(
@@ -831,6 +845,7 @@ async def route_general_request(
             contract,
             max_buffered_bytes=max_bytes,
             max_buffer_seconds=max_seconds,
+            capture_callback=capture_callback,
         )
         iterator = traced_stream().__aiter__()
         read = None

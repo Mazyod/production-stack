@@ -378,6 +378,70 @@ async def test_non_streaming_repairs_and_sets_content_length(setup_engaged):
 
 
 @pytest.mark.asyncio
+async def test_non_streaming_refusal_is_sent_to_configured_capture_sink(
+    setup_engaged,
+):
+    req, _ = setup_engaged
+    req.app.state.structured_output_repair_capture_sink = MagicMock()
+    content = '{"summary": {"summary": "x"}'
+
+    async def backend(*args, **kwargs):
+        yield {"content-type": "application/json"}, 200
+        yield _non_streaming_body(content)
+
+    with patch(
+        "vllm_router.services.request_service.request.process_request",
+        side_effect=backend,
+    ):
+        from vllm_router.services.request_service.request import route_general_request
+
+        response = await route_general_request(req, "/v1/chat/completions", MagicMock())
+
+    assert await _collect(response) == _non_streaming_body(content)
+    req.app.state.structured_output_repair_capture_sink.capture.assert_called_once()
+    call = req.app.state.structured_output_repair_capture_sink.capture.call_args
+    assert call.kwargs["model"] == "m"
+    assert call.kwargs["output"] == content
+    assert call.kwargs["telemetry"].status == "ambiguous"
+
+
+@pytest.mark.asyncio
+async def test_streaming_refusal_is_sent_to_configured_capture_sink():
+    req, patches = _make_request(_request_body(engaged=True, stream=True))
+    req.app.state.structured_output_repair_capture_sink = MagicMock()
+    frame = _chunk({"content": "not json"}, finish_reason="stop")
+
+    async def backend(*args, **kwargs):
+        yield {"content-type": "text/event-stream"}, 200
+        yield frame
+
+    for active_patch in patches:
+        active_patch.start()
+    try:
+        with patch(
+            "vllm_router.services.request_service.request.process_request",
+            side_effect=backend,
+        ):
+            from vllm_router.services.request_service.request import (
+                route_general_request,
+            )
+
+            response = await route_general_request(
+                req, "/v1/chat/completions", MagicMock()
+            )
+            assert await _collect(response) == frame
+    finally:
+        for active_patch in reversed(patches):
+            active_patch.stop()
+
+    req.app.state.structured_output_repair_capture_sink.capture.assert_called_once()
+    call = req.app.state.structured_output_repair_capture_sink.capture.call_args
+    assert call.kwargs["model"] == "m"
+    assert call.kwargs["output"] == "not json"
+    assert call.kwargs["telemetry"].status == "unknown"
+
+
+@pytest.mark.asyncio
 async def test_unengaged_request_is_byte_identical(setup_unengaged):
     """No response_format -> the new machinery must not touch a single byte."""
     req, _ = setup_unengaged
