@@ -1,4 +1,5 @@
 import json
+import random
 import time
 from importlib import import_module
 
@@ -103,6 +104,64 @@ REAL_CORRUPTION_CASES = [
 )
 def test_is_valid_json_prefix(content, expected):
     assert is_valid_json_prefix(content) is expected
+
+
+def test_every_prefix_of_generated_legal_json_is_accepted():
+    rng = random.Random(0xA11B1)
+    atoms = [
+        None,
+        True,
+        False,
+        0,
+        -17,
+        6.022e23,
+        -1.25e-7,
+        "",
+        'braces {[]} and quotes " with slash \\',
+        "escaped unicode café ☕ \U0001f680",
+        "control\b\f\n\r\t",
+    ]
+
+    def value(depth):
+        if depth == 0 or rng.random() < 0.45:
+            return rng.choice(atoms)
+        if rng.random() < 0.5:
+            return [value(depth - 1) for _ in range(rng.randint(0, 2))]
+        return {
+            f"key-{depth}-{index}-{rng.randrange(1000)}": value(depth - 1)
+            for index in range(rng.randint(0, 2))
+        }
+
+    documents = []
+    generated_prefixes = 0
+    while generated_prefixes < 96_000:
+        index = len(documents)
+        document = json.dumps(
+            value(2),
+            ensure_ascii=bool(index % 2),
+            indent=2 if index % 11 == 0 else None,
+        )
+        documents.append(document)
+        generated_prefixes += len(document) + 1
+    documents.extend(
+        [
+            "[" * 40 + "0" + "]" * 40,
+            '{"unicode":"\\u0041\\u00e9\\ud83d\\ude80"}',
+            ' \r\n\t { "numbers" : [ -0.5e+12, 9E-9, -42 ] } \n',
+        ]
+    )
+
+    checked = 0
+    for document in documents:
+        json.loads(document)
+        for offset in range(len(document) + 1):
+            assert is_valid_json_prefix(document[:offset]), (
+                f"legal prefix rejected at {offset}/{len(document)}: "
+                f"{document[:offset]!r}"
+            )
+            checked += 1
+
+    assert checked >= 90_000
 
 
 @pytest.mark.parametrize(

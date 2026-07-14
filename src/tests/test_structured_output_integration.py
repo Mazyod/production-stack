@@ -1,10 +1,12 @@
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import jsonschema
 import pytest
+from fastapi import FastAPI
 
 STRICT = {
     "type": "object",
@@ -497,6 +499,116 @@ async def test_non_streaming_repairs_and_sets_content_length(setup_engaged):
     assert b"\\u00e9" not in body
     assert b"\\u2615" not in body
     assert resp.headers["content-length"] == str(len(body))
+
+
+@pytest.mark.asyncio
+async def test_initialize_all_flag_engages_end_to_end_response_repair():
+    import vllm_router.app as app_module
+
+    with patch.object(
+        sys,
+        "argv",
+        [
+            "vllm-router",
+            "--service-discovery",
+            "external-only",
+            "--routing-logic",
+            "roundrobin",
+            "--enable-structured-output-repair",
+        ],
+    ):
+        args = app_module.parse_args()
+
+    initialized_app = FastAPI()
+    router = MagicMock()
+    router.max_instance_failover_reroute_attempts = 0
+    router.route_request.return_value = "http://engine"
+    router.extract_session_id.return_value = None
+    feature_gates = MagicMock()
+    feature_gates.is_enabled.return_value = False
+    with (
+        patch.object(app_module, "initialize_service_discovery"),
+        patch.object(app_module, "initialize_engine_stats_scraper"),
+        patch.object(app_module, "initialize_request_stats_monitor"),
+        patch.object(app_module, "initialize_routing_logic"),
+        patch.object(app_module, "initialize_feature_gates"),
+        patch.object(app_module, "get_feature_gates", return_value=feature_gates),
+        patch.object(app_module, "get_engine_stats_scraper", return_value=MagicMock()),
+        patch.object(app_module, "get_request_stats_monitor", return_value=MagicMock()),
+        patch.object(app_module, "get_routing_logic", return_value=router),
+        patch.object(app_module, "get_request_rewriter", return_value=MagicMock()),
+    ):
+        app_module.initialize_all(initialized_app, args)
+
+    assert initialized_app.state.structured_output_repair_enabled is True
+    request, request_patches = _make_request(_request_body(engaged=True))
+    request.app.state = initialized_app.state
+    request.app.state.semantic_cache_available = False
+    request.app.state.otel_enabled = False
+    request.app.state.callbacks = None
+    original = _non_streaming_body('{{"summary": "wired"}')
+
+    async def backend(*args, **kwargs):
+        yield {"content-type": "application/json"}, 200
+        yield original
+
+    for active_patch in request_patches:
+        active_patch.start()
+    try:
+        with patch(
+            "vllm_router.services.request_service.request.process_request",
+            side_effect=backend,
+        ):
+            from vllm_router.services.request_service.request import (
+                route_general_request,
+            )
+
+            response = await route_general_request(
+                request, "/v1/chat/completions", MagicMock()
+            )
+        repaired = json.loads(await _collect(response))["choices"][0]["message"][
+            "content"
+        ]
+        assert repaired == '{"summary": "wired"}'
+    finally:
+        for active_patch in reversed(request_patches):
+            active_patch.stop()
+
+
+@pytest.mark.asyncio
+async def test_response_path_records_repair_metric_labels(setup_engaged):
+    req, _ = setup_engaged
+
+    async def backend(*args, **kwargs):
+        yield {"content-type": "application/json"}, 200
+        yield _non_streaming_body('{{"summary": "x"}')
+
+    with (
+        patch(
+            "vllm_router.services.request_service.request.process_request",
+            side_effect=backend,
+        ),
+        patch(
+            "vllm_router.services.request_service.request.structured_output_repairs_total.labels"
+        ) as repair_labels,
+        patch(
+            "vllm_router.services.request_service.request.structured_output_garbage_prefix_bytes.labels"
+        ) as prefix_labels,
+    ):
+        from vllm_router.services.request_service.request import route_general_request
+
+        response = await route_general_request(req, "/v1/chat/completions", MagicMock())
+        body = await _collect(response)
+
+    assert json.loads(body)["choices"][0]["message"]["content"] == ('{"summary": "x"}')
+    repair_labels.assert_called_once_with(
+        model="m",
+        status="repaired",
+        mode="extra_brace",
+    )
+    repair_labels.return_value.inc.assert_called_once_with()
+    prefix_labels.assert_called_once_with(model="m")
+    prefix_labels.return_value.observe.assert_called_once_with(1)
 
 
 @pytest.mark.asyncio

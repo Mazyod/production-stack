@@ -1,3 +1,4 @@
+import random
 import time
 
 from vllm_router.services.structured_output.sse import SSEParser
@@ -82,6 +83,34 @@ def test_raw_bytes_roundtrip_exactly_when_every_byte_is_a_chunk():
         events.extend(parser.feed(bytes((byte,))))
 
     assert b"".join(event.raw for event in events) + parser.flush() == stream
+
+
+def test_randomized_sse_byte_roundtrip_is_exact():
+    rng = random.Random(0x55E)
+    corpus = [
+        b'data: {"a": 1}\n\n: hb\n\ndata: [DONE]\n\n',
+        b'data: {"a": 1}\r\n\r\n: hb\r\n\r\ndata: [DONE]\r\n\r\n',
+        b"data: first\ndata: second\n\n",
+        b"data: first\r\ndata: second\r\n\r\nunterminated-tail",
+        b"data: \xff\xfe\x80\n\n: \xf0\x28\x8c\xbc\n\n",
+        b"\x00\xffgarbage\r\n\r\ntrailing\xfe",
+    ]
+
+    for trial in range(3_000):
+        stream = corpus[trial % len(corpus)]
+        cuts = sorted(
+            rng.sample(
+                range(1, len(stream)),
+                k=rng.randint(0, min(12, len(stream) - 1)),
+            )
+        )
+        parser = SSEParser()
+        events = []
+        for start, end in zip([0, *cuts], [*cuts, len(stream)]):
+            events.extend(parser.feed(stream[start:end]))
+
+        reconstructed = b"".join(event.raw for event in events) + parser.flush()
+        assert reconstructed == stream, f"round-trip failed on {trial=} {cuts=}"
 
 
 def test_unterminated_one_byte_chunks_parse_under_hard_time_bound():

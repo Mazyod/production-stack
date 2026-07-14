@@ -131,13 +131,29 @@ def _transform_response_body(
     changed = False
 
     try:
+        # Match streaming's poison semantics before attempting any repair. A
+        # present message must be an object, but absent/no-content messages are
+        # valid response shapes and remain ordinary no-terminal declines.
+        if any(
+            not isinstance(choice, dict)
+            or ("message" in choice and not isinstance(choice["message"], dict))
+            for choice in choices
+        ):
+            return body, [_POISONED_TELEMETRY]
+        if any(
+            isinstance((message := choice.get("message")), dict)
+            and isinstance(message.get("content"), str)
+            and bool(message["content"])
+            and choice.get("finish_reason") is None
+            for choice in choices
+        ):
+            return body, [_NO_TERMINAL_TELEMETRY]
+
         for choice in choices:
-            if not isinstance(choice, dict):
-                continue
             result = _repair_choice(choice, contract)
             if result is None:
                 telemetry.append(_NO_TERMINAL_TELEMETRY)
-                return body, telemetry
+                continue
             _capture_refusal(
                 capture_callback,
                 choice["message"]["content"],
