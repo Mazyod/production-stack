@@ -22,8 +22,8 @@ decoding**, **thinking**, and **a grammar** are all active, the JSON is corrupte
 | mode | example |
 |---|---|
 | brace fused to fence / language tag | ` ```json{"summary": … ` |
-| doubled brace | `{{"summary": … ` |
-| brace-quote-brace | `{"{"summary": … ` |
+| doubled brace | `{{"summary": …` |
+| brace-quote-brace | `{"{"summary": …` |
 
 Each call site strips this by hand today. That is tedious, and impossible for call sites we do not own.
 
@@ -131,7 +131,7 @@ in `G` poisoned every later candidate).
 
 - Any `G` that is *syntactically impossible* as a document prefix is repaired — this covers every
   observed mode, and every fused/combined variant, **with no artifact-specific matching**.
-- Any `G` that is *syntactically valid* as a document prefix (e.g. `{"a": `) is **irreducibly
+- Any `G` that is *syntactically valid* as a document prefix (e.g. `{"a":`) is **irreducibly
   ambiguous** with truncation. We **refuse and pass through** — a false negative, never a wrong answer.
 
 The only artifact-specific element that remains is the trailing **closing-fence** allowance, and it is

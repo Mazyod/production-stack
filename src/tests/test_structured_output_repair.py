@@ -10,7 +10,6 @@ from vllm_router.services.structured_output.repair import (
     repair_tool_arguments,
 )
 
-
 OBJECT_SCHEMA = {
     "type": "object",
     "properties": {"summary": {"type": "string"}},
@@ -83,7 +82,7 @@ REAL_CORRUPTION_CASES = [
         ("1e+", True),
         ("t", True),
         ("tr", True),
-        ("tru", True),
+        ("tru", True),  # codespell:ignore tru
         ("true", True),
         ('{{"summary": "x"}', False),
         ('{"{"summary": "x"}', False),

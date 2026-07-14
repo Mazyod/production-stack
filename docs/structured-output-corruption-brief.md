@@ -107,6 +107,7 @@ Take a prompt that reproduces **(c)**, and ask vLLM to return the chosen token a
 ```
 
 Capture and return **all** of:
+
 - `choices[0].logprobs.content[]` — the token array (**ids and strings**)
 - `choices[0].message.content`
 - `choices[0].message.reasoning_content`
@@ -156,7 +157,7 @@ becomes samplable.
 - **Corroborating tell:** in vLLM #39130, throughput *rose* 65→95 TPS when this fired, because the FSM work was
   being skipped. If you have throughput history, an unexplained speed-up is a fingerprint.
 - Refs: [#18819](https://github.com/vllm-project/vllm/issues/18819) (reports literally *"an extra `{` or `[` or
-  ``` in the beginning"*), [#37359](https://github.com/vllm-project/vllm/issues/37359),
+  ```` ``` ```` in the beginning"*), [#37359](https://github.com/vllm-project/vllm/issues/37359),
   [#39130](https://github.com/vllm-project/vllm/issues/39130).
 
 ### H2 — Speculative decoding × structured-output FSM rollback  ← leading suspect for (c)

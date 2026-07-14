@@ -246,6 +246,87 @@ async def test_unengaged_cache_lookup_uses_post_rewrite_json(setup_unengaged):
 
 
 @pytest.mark.asyncio
+async def test_semantic_cache_lookup_uses_body_changing_rewriter_output(
+    setup_unengaged,
+):
+    import vllm_router.services.request_service.request as request_module
+
+    req, _ = setup_unengaged
+    req.app.state.semantic_cache_available = True
+    rewritten_json = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "rewritten"}],
+        "stream": False,
+    }
+
+    class BodyChangingRewriter:
+        def rewrite_request(self, request_body, model, endpoint):
+            assert request_body == json.dumps(_request_body(engaged=False)).encode()
+            assert model == "m"
+            assert endpoint == "/v1/chat/completions"
+            return json.dumps(rewritten_json).encode()
+
+    cached = MagicMock()
+    with (
+        patch.object(
+            request_module, "check_semantic_cache", new_callable=AsyncMock, create=True
+        ) as cache,
+        patch.object(request_module, "semantic_cache_available", True),
+        patch.object(
+            request_module, "is_request_rewriter_initialized", return_value=True
+        ),
+        patch.object(
+            request_module,
+            "get_request_rewriter",
+            return_value=BodyChangingRewriter(),
+        ),
+        patch.object(request_module, "process_request") as process,
+    ):
+        cache.return_value = cached
+        response = await request_module.route_general_request(
+            req, "/v1/chat/completions", MagicMock()
+        )
+
+    assert response is cached
+    cache.assert_awaited_once_with(
+        request=req,
+        request_json=rewritten_json,
+    )
+    process.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pre_request_callback_runs_on_semantic_cache_hit(setup_unengaged):
+    import vllm_router.services.request_service.request as request_module
+
+    req, _ = setup_unengaged
+    req.app.state.semantic_cache_available = True
+    req.app.state.callbacks = MagicMock()
+    req.app.state.callbacks.pre_request.return_value = None
+    cached = MagicMock()
+
+    with (
+        patch.object(
+            request_module, "check_semantic_cache", new_callable=AsyncMock, create=True
+        ) as cache,
+        patch.object(request_module, "semantic_cache_available", True),
+        patch.object(request_module, "process_request") as process,
+    ):
+        cache.return_value = cached
+        response = await request_module.route_general_request(
+            req, "/v1/chat/completions", MagicMock()
+        )
+
+    assert response is cached
+    req.app.state.callbacks.pre_request.assert_called_once_with(
+        req,
+        json.dumps(_request_body(engaged=False)).encode(),
+        _request_body(engaged=False),
+    )
+    process.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_feature_flag_off_preserves_engaged_cache_lookup(setup_engaged):
     """Repair disabled means an otherwise engaged request still uses the cache."""
     import vllm_router.services.request_service.request as request_module

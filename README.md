@@ -11,10 +11,11 @@ This is a lightweight fork of [vllm-project/production-stack](https://github.com
 - **`/pooling` route**: Proxies vLLM's `/pooling` endpoint (backend chosen by the request body's `model` field, same as `/v1/embeddings`). Needed for Jina Embeddings v4 multi-vector (ColBERT) output, which vLLM serves only on `/pooling`.
 - **Default port 8080**: Changed from 8001 to match the [vllm-project/router](https://github.com/vllm-project/router) default for easier future migration.
 - **numpy unpinned**: `>=1.26.4` instead of `==1.26.4` (no Python 3.13 wheels for 1.26.4).
+- **Structured-output boundary repair**: `--enable-structured-output-repair` (off by default) repairs vLLM's grammar-constrained JSON when speculative decoding + thinking corrupt the reasoning→answer boundary (`` ```json{ ``, `{{`, `{"{`). The router locates the true document using the caller's own JSON Schema as an oracle and only commits when the output is syntactically impossible as a truncation; on any doubt it returns the backend's original bytes, byte-for-byte. See [Structured-output boundary repair](#structured-output-boundary-repair) below.
 
 Pre-built images are published to Docker Hub, tagged to match upstream releases:
 
-```
+```console
 docker pull openimage/production-stack-router:v0.1.10
 ```
 
@@ -22,14 +23,78 @@ docker pull openimage/production-stack-router:v0.1.10
 
 The stock `vllm/vllm-openai` image ships **without** the audio extras, so `POST /v1/audio/transcriptions` fails at request time with `ImportError: Please install vllm[audio] for audio support` (surfaced to clients as a generic `400 Invalid or unsupported audio file`). This fork also publishes a drop-in replacement that installs the vLLM `audio` extra (`av`, `soundfile`, `soxr`, `scipy`, … — the set tracks the vLLM version), pinned to the exact vLLM build in the base image so nothing else changes:
 
-```
+```console
 docker pull openimage/vllm-openai-audio:v0.10.0
 ```
 
 It tracks vLLM core releases (a separate cadence from the router), is built from `docker/Dockerfile.audio` by the [`build-vllm-audio`](.github/workflows/build-vllm-audio.yml) workflow, and keeps the upstream entrypoint — swap the image and Whisper/transcription endpoints just work.
 
+### Structured-output boundary repair
+
+`--enable-structured-output-repair` enables router-side repair for content generated under a discriminating **object-rooted** JSON Schema. It is off by default. Requests using `logprobs`, schema-less `json_object` mode, **array- or scalar-rooted** schemas, non-discriminating schemas, tool schemas alone, and non-2xx backend responses remain on the existing byte-preserving path.
+
+Buffering defaults to 1 MiB and 30 seconds; configure it with `--structured-output-repair-max-bytes` and `--structured-output-repair-max-seconds`. Any cap, timeout, ambiguity, exception, or transport failure replays the original bytes.
+
+Diagnostic captures for `ambiguous` and `unknown` outcomes are disabled by default. Enable them with `--structured-output-repair-capture-dir` only after creating a router-owned `0700` directory. Captures are sampled, structurally redacted, capped at 4 KiB, retained for seven days, and written as `0600` files. Raw model output is never placed in metric labels or ordinary logs.
+
+See the [structured-output boundary-repair design](docs/superpowers/specs/2026-07-13-structured-output-boundary-repair-design.md) for safety properties and limits.
+
+This is a narrow safety net for responses where a short garbage prefix precedes a complete JSON document. The caller's schema is used to locate and validate that document. A schema is discriminating only when it has a non-empty `required` list or sets `additionalProperties` to `false`. Scalar roots, array roots, `json_object` mode, non-discriminating schemas, requests with `logprobs`, and non-2xx responses do not engage repair. Tool-call repair is out of scope in this version.
+
+For an engaged streaming response, the router buffers from the first content frame until the stream ends. This increases time to first token in exchange for correctness: a structured-output caller needs the complete document before parsing it. On any doubt, the router returns the original response bytes byte-for-byte. Only a `repaired` outcome changes the body; in every other outcome, enabling the feature changes no response bytes.
+
+The operator flags and their defaults are:
+
+- `--enable-structured-output-repair`: disabled.
+- `--structured-output-repair-max-bytes`: `1048576` bytes (1 MiB), the per-request streaming buffer cap.
+- `--structured-output-repair-max-seconds`: `30`, the buffering deadline in seconds.
+- `--structured-output-repair-capture-dir`: unset, so diagnostic capture is disabled.
+- `--structured-output-repair-capture-sample-rate`: `0.01`, the fraction of `ambiguous` and `unknown` outcomes captured.
+- `--structured-output-repair-capture-max-bytes`: `4096`, the maximum UTF-8 size of a redacted output excerpt.
+- `--structured-output-repair-capture-retention-days`: `7` days.
+
+The capture sink writes at most 64 MiB in total across all retained capture files, independent of the per-record capture limit. The configured directory must be owned by the router user and have mode `0700`; capture files use mode `0600`.
+
+The feature exports these Prometheus metrics:
+
+- `vllm:structured_output_repairs_total{model,status,mode}` counts engaged repair outcomes.
+- `vllm:structured_output_garbage_prefix_bytes{model}` measures the UTF-8 byte length removed by successful repairs.
+- `vllm:structured_output_schema_rejections_total{model,reason}` counts schemas rejected at the engagement boundary.
+
+Use the `status` label on `vllm:structured_output_repairs_total` as follows:
+
+- `repaired`: a corrupt response was fixed. This is the only status where the client received a changed body.
+- `clean`: repair engaged, but nothing was wrong.
+- `incomplete`: the backend reported `finish_reason: "length"`, so the router declined repair.
+- `ambiguous` or `unknown`: the router could not safely repair the output. Investigate these outcomes; enable the capture sink to inspect redacted samples.
+- `no_terminal`: the stream ended with a content index that never received a `finish_reason`.
+- `poisoned`: a frame arrived that the router could not prove was content-free, so it replayed the buffered response.
+- `capped`: the byte cap was reached. Consider whether `--structured-output-repair-max-bytes` is too low for the workload.
+- `timeout`: the buffering deadline was reached, which can indicate a slow backend.
+- `error`: an exception occurred on the transform path and should be investigated.
+
+For every status except `repaired`, the client receives the original bytes unchanged.
+
+#### Golden-corpus regression test
+
+`src/tests/test_structured_output_corpus.py` validates repair behavior against `matrix_results.json`, a corpus of 1,536 real production requests. That file is not included in this repository, and the test skips when `STRUCTURED_OUTPUT_CORPUS` is unset. Run it with:
+
+```bash
+STRUCTURED_OUTPUT_CORPUS=/path/to/matrix_results.json uv run pytest src/tests/test_structured_output_corpus.py -q
+```
+
+The field mapping at the top of the test module is unverified against the real corpus. If the mapping is wrong, the harness fails loudly with mapping or classification errors; it never silently passes.
+
+#### Related semantic-cache behavior changes
+
+Two routing changes affect chat-completion traffic even when structured-output repair is disabled:
+
+1. Semantic-cache lookup now uses the post-rewrite request body. It previously ran before routing against the pre-rewrite body. This is currently inert because only `NoopRequestRewriter` ships, but enabling a body-changing rewriter in the future will change cache keys for all chat-completion traffic, independently of the repair flag.
+2. `callbacks.pre_request(...)` now runs on semantic-cache hits. Cache hits were previously returned from `route_chat_completion` before reaching `route_general_request`, so callbacks did not run for cache-served responses. This means authentication, quota, and logging callbacks can now observe cache hits.
+
 ---
 
+<!-- markdownlint-disable-next-line MD025 -->
 # vLLM Production Stack: reference stack for production vLLM deployment
 
 | [**Blog**](https://lmcache.github.io) | [**Docs**](https://docs.vllm.ai/projects/production-stack) | [**Production-Stack Slack Channel**](https://communityinviter.com/apps/vllm-dev/join-vllm-developers-slack) | [**LMCache Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ) | [**Interest Form**](https://forms.gle/mQfQDUXbKfp2St1z7) |

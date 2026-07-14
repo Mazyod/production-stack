@@ -32,6 +32,7 @@
 ## File Structure
 
 **Create:**
+
 - `src/vllm_router/services/structured_output/__init__.py` — public exports
 - `src/vllm_router/services/structured_output/json_prefix.py` — `is_valid_json_prefix()` (the ambiguity gate)
 - `src/vllm_router/services/structured_output/repair.py` — `repair()`, `RepairResult` (the pure core)
@@ -47,6 +48,7 @@
 - `src/tests/test_structured_output_capture.py`
 
 **Modify:**
+
 - `pyproject.toml:14-34` — add `jsonschema`
 - `src/vllm_router/requirements.txt` — add `jsonschema` (must stay in sync with pyproject)
 - `src/vllm_router/services/metrics_service/__init__.py` — add metrics
@@ -62,22 +64,27 @@
 ### Task 1: Promote the repair core
 
 **Files:**
+
 - Create: `src/vllm_router/services/structured_output/__init__.py`, `json_prefix.py`, `repair.py`
 - Modify: `pyproject.toml`, `src/vllm_router/requirements.txt`
 - Test: `src/tests/test_structured_output_repair.py`
 
 **Interfaces:**
+
 - Consumes: nothing.
 - Produces: `is_valid_json_prefix(content: str) -> bool`; `repair(content: str, schema: dict | None, *, finish_reason: str | None, max_prefix_bytes: int = 256) -> RepairResult`; `RepairResult(status, text, value, garbage_prefix, trailing, mode, candidates_tried)` where `status` ∈ `{"clean","repaired","incomplete","ambiguous","unknown"}`.
 
 - [ ] **Step 1: Add the dependency to both files**
 
 `pyproject.toml` — add to the `dependencies` list (the file comment says it must stay in sync with `src/vllm_router/requirements.txt`):
+
 ```toml
     "jsonschema>=4.23,<5",
 ```
+
 `src/vllm_router/requirements.txt` — add the same line:
-```
+
+```text
 jsonschema>=4.23,<5
 ```
 
@@ -89,12 +96,14 @@ Expected: prints `4.x` (it was previously NOT installed).
 - [ ] **Step 3: Copy the validated spike code**
 
 Copy `spikes/json_boundary_repair/repair.py` into the new package, splitting it:
+
 - `json_prefix.py` gets `is_valid_json_prefix()` and its helpers.
 - `repair.py` gets `RepairResult`, `repair()`, the validator cache, and imports `is_valid_json_prefix` from `json_prefix`.
 
 **Do not change the algorithm.** It is validated by 69 tests and a property check over 95,854 prefixes.
 
 `src/vllm_router/services/structured_output/__init__.py`:
+
 ```python
 from vllm_router.services.structured_output.repair import RepairResult, repair
 
@@ -124,6 +133,7 @@ Expected: 69 passed.
 ```bash
 git rm -r spikes/json_boundary_repair
 ```
+
 The code now lives in the package; leaving a copy invites drift.
 
 - [ ] **Step 7: Commit**
@@ -138,10 +148,12 @@ git commit -m "feat(structured-output): add boundary JSON repair core"
 ### Task 2: Output contract extraction (the engagement decision)
 
 **Files:**
+
 - Create: `src/vllm_router/services/structured_output/contract.py`
 - Test: `src/tests/test_structured_output_contract.py`
 
 **Interfaces:**
+
 - Consumes: nothing from Task 1.
 - Produces: `OutputContract(content_schema: dict | None, rejected_non_discriminating: bool, engaged: bool)` and `extract_output_contract(request_json: dict) -> OutputContract`.
 
@@ -152,6 +164,7 @@ This is where every "never engage" rule from the Global Constraints is enforced.
 - [ ] **Step 1: Write the failing tests**
 
 `src/tests/test_structured_output_contract.py`:
+
 ```python
 import pytest
 
@@ -264,6 +277,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'vllm_router.services.s
 - [ ] **Step 3: Implement**
 
 `src/vllm_router/services/structured_output/contract.py`:
+
 ```python
 """Decide whether a request is eligible for boundary repair, and extract its schemas."""
 
@@ -368,10 +382,12 @@ git commit -m "feat(structured-output): add output contract extraction and engag
 ### Task 3: Byte-preserving incremental SSE parser
 
 **Files:**
+
 - Create: `src/vllm_router/services/structured_output/sse.py`
 - Test: `src/tests/test_structured_output_sse.py`
 
 **Interfaces:**
+
 - Produces: `SSEEvent(raw: bytes, data: str | None, is_done: bool)` and `SSEParser` with `feed(chunk: bytes) -> list[SSEEvent]`, `flush() -> bytes`, and `buffered_bytes: int`.
 
 `raw` is the frame's **exact original bytes including its terminator** — this is what makes byte-for-byte replay possible. `data` is the decoded payload of a single-`data:` frame, or `None` for anything else (comments, heartbeats, `[DONE]`, multi-line/unknown frames), which must be passed through verbatim.
@@ -381,6 +397,7 @@ Splitting on byte terminators and decoding only *complete* frames means split UT
 - [ ] **Step 1: Write the failing tests**
 
 `src/tests/test_structured_output_sse.py`:
+
 ```python
 from vllm_router.services.structured_output.sse import SSEParser
 
@@ -464,6 +481,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Implement**
 
 `src/vllm_router/services/structured_output/sse.py`:
+
 ```python
 """Byte-preserving incremental SSE parser.
 
@@ -571,16 +589,19 @@ git commit -m "feat(structured-output): add byte-preserving incremental SSE pars
 ### Task 4: Non-streaming transform
 
 **Files:**
+
 - Create: `src/vllm_router/services/structured_output/transform.py`
 - Test: `src/tests/test_structured_output_transform.py`
 
 **Interfaces:**
+
 - Consumes: `repair`, `RepairResult` (Task 1); `OutputContract` (Task 2).
 - Produces: `RepairTelemetry(status, mode, garbage_prefix_bytes)` and `transform_response_body(body: bytes, contract: OutputContract) -> tuple[bytes, list[RepairTelemetry]]`. **On any failure it returns the original `body` object unchanged.**
 
 - [ ] **Step 1: Write the failing tests**
 
 `src/tests/test_structured_output_transform.py`:
+
 ```python
 import json
 
@@ -670,6 +691,7 @@ Expected: FAIL — module not found.
 - [ ] **Step 3: Implement**
 
 `src/vllm_router/services/structured_output/transform.py`:
+
 ```python
 """Apply boundary repair to backend responses.
 
@@ -789,10 +811,12 @@ git commit -m "feat(structured-output): add non-streaming response transform"
 ### Task 5: Streaming state machine (frame retention + raw replay)
 
 **Files:**
+
 - Modify: `src/vllm_router/services/structured_output/transform.py`
 - Test: `src/tests/test_structured_output_transform.py`
 
 **Interfaces:**
+
 - Consumes: `SSEParser`, `SSEEvent` (Task 3); `repair` (Task 1); `OutputContract` (Task 2).
 - Produces: `StreamRepairer(contract, max_buffered_bytes=1_048_576, max_buffer_seconds=30.0)` with `feed(chunk: bytes) -> bytes`, `flush() -> bytes`, `abort() -> bytes`, `buffering: bool`, `seconds_remaining: float | None`, and `telemetry: list[RepairTelemetry]`.
 
@@ -805,6 +829,7 @@ Rewriting *in place* (rather than synthesizing new frames) preserves ids, `model
 - [ ] **Step 1: Write the failing tests**
 
 Append to `src/tests/test_structured_output_transform.py`:
+
 ```python
 from vllm_router.services.structured_output.transform import StreamRepairer
 
@@ -959,6 +984,7 @@ Expected: FAIL — `ImportError: cannot import name 'StreamRepairer'`
 - [ ] **Step 3: Implement**
 
 Append to `src/vllm_router/services/structured_output/transform.py`:
+
 ```python
 import time
 from collections.abc import Callable
@@ -1209,10 +1235,12 @@ git commit -m "feat(structured-output): add streaming repair with frame retentio
 ### Task 6: Metrics
 
 **Files:**
+
 - Modify: `src/vllm_router/services/metrics_service/__init__.py`
 - Test: `src/tests/test_structured_output_transform.py` (extend)
 
 **Interfaces:**
+
 - Produces: `structured_output_repairs_total` (Counter, labels `["model", "status", "mode"]`), `structured_output_garbage_prefix_bytes` (Histogram, labels `["model"]`), and `structured_output_schema_rejections_total` (Counter, labels `["model", "reason"]`).
 
 Follow the existing convention exactly: module-level globals, `vllm:` name prefix, default registry (see `input_tokens_total` at `metrics_service/__init__.py:55-57`). **Never put raw model output in a label** — `mode` is a bounded enum, not free text.
@@ -1220,6 +1248,7 @@ Follow the existing convention exactly: module-level globals, `vllm:` name prefi
 - [ ] **Step 1: Add the metrics**
 
 Append to `src/vllm_router/services/metrics_service/__init__.py`:
+
 ```python
 structured_output_repairs_total = Counter(
     "vllm:structured_output_repairs_total",
@@ -1303,15 +1332,18 @@ git commit -m "feat(structured-output): add repair telemetry"
 ### Task 7: CLI flag and app wiring
 
 **Files:**
+
 - Modify: `src/vllm_router/parsers/parser.py`, `src/vllm_router/app.py`
 - Test: `src/tests/test_parser.py`
 
 **Interfaces:**
+
 - Produces: `args.enable_structured_output_repair` (bool), `args.structured_output_repair_max_bytes` (int), `args.structured_output_repair_max_seconds` (float), and matching `app.state` values.
 
 - [ ] **Step 1: Add the flags**
 
 In `src/vllm_router/parsers/parser.py`, alongside the other feature flags (match the `--enable-batch-api` shape at parser.py:298-302):
+
 ```python
     parser.add_argument(
         "--enable-structured-output-repair",
@@ -1335,6 +1367,7 @@ In `src/vllm_router/parsers/parser.py`, alongside the other feature flags (match
 - [ ] **Step 2: Wire into app state**
 
 In `src/vllm_router/app.py`, inside `initialize_all()` next to the other `app.state` assignments (app.py:361-365):
+
 ```python
     app.state.structured_output_repair_enabled = args.enable_structured_output_repair
     app.state.structured_output_repair_max_bytes = args.structured_output_repair_max_bytes
@@ -1392,10 +1425,12 @@ git commit -m "feat(structured-output): add --enable-structured-output-repair fl
 ### Task 8: Wire into the response path
 
 **Files:**
+
 - Modify: `src/vllm_router/services/request_service/request.py:625-676`
 - Test: `src/tests/test_structured_output_integration.py`
 
 **Interfaces:**
+
 - Consumes: everything from Tasks 1–7.
 - Produces: no new public API — this is the integration.
 
@@ -1406,6 +1441,7 @@ git commit -m "feat(structured-output): add --enable-structured-output-repair fl
 - [ ] **Step 1: Write the failing integration tests**
 
 Create `src/tests/test_structured_output_integration.py` with these complete, collecting fixtures and helpers. Response headers from the backend are plain dictionaries, so `.get()` and `.items()` have real behavior.
+
 ```python
 import asyncio
 import json
@@ -1718,6 +1754,7 @@ Expected: FAIL — repair is not wired in and the watchdog/replay branches do no
 - [ ] **Step 3: Implement the branch**
 
 Replace `request.py:671-676` (the single `return StreamingResponse(...)`) with:
+
 ```python
     candidate_contract = (
         extract_output_contract(request_json)
@@ -1834,6 +1871,7 @@ Replace `request.py:671-676` (the single `return StreamingResponse(...)`) with:
 ```
 
 Add near the top of `request.py`:
+
 ```python
 import asyncio
 
@@ -1905,6 +1943,7 @@ git commit -m "feat(structured-output): wire boundary repair into the response p
 ### Task 9: Skip semantic-cache lookup and storage for engaged requests
 
 **Files:**
+
 - Modify: `src/vllm_router/routers/main_router.py:35-65`, `src/vllm_router/services/request_service/request.py:275-370,417-490`, `src/vllm_router/experimental/semantic_cache_integration.py:181-205`
 - Test: `src/tests/test_structured_output_integration.py` (extend)
 
@@ -1983,6 +2022,7 @@ Expected: FAIL — lookup still occurs in `main_router`, and `process_request` h
 - [ ] **Step 3: Implement**
 
 Delete the optional semantic-cache import and the entire lookup block from `route_chat_completion()` in `main_router.py`; it becomes:
+
 ```python
 @main_router.post("/v1/chat/completions")
 async def route_chat_completion(request: Request, background_tasks: BackgroundTasks):
@@ -2106,6 +2146,7 @@ git commit -m "fix(structured-output): skip semantic cache for engaged requests"
 ### Task 10: Golden-corpus regression
 
 **Files:**
+
 - Create: `src/tests/test_structured_output_corpus.py`
 
 **Why:** the platform team holds `matrix_results.json` — **1,536 real requests with raw outputs**. That is the only test set drawn from production reality rather than our imagination. Every known-corrupt sample must repair to schema-valid; every clean sample must pass through **byte-identical**.
@@ -2128,6 +2169,7 @@ Write the verified paths for `content`, `schema`, `finish_reason`, and the clean
 - [ ] **Step 2: Write the corpus test**
 
 `src/tests/test_structured_output_corpus.py`:
+
 ```python
 import json
 import os
@@ -2202,6 +2244,7 @@ git commit -m "test(structured-output): add golden-corpus regression harness"
 ### Task 11: Secure diagnostic capture for ambiguous/unknown outcomes
 
 **Files:**
+
 - Create: `src/vllm_router/services/structured_output/capture.py`, `src/tests/test_structured_output_capture.py`
 - Modify: `src/vllm_router/services/structured_output/transform.py`, `src/vllm_router/services/request_service/request.py`, `src/vllm_router/parsers/parser.py`, `src/vllm_router/app.py`
 
