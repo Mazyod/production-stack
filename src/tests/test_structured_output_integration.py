@@ -3,6 +3,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import jsonschema
 import pytest
 
 STRICT = {
@@ -246,6 +247,39 @@ async def test_unengaged_cache_lookup_uses_post_rewrite_json(setup_unengaged):
 
 
 @pytest.mark.asyncio
+async def test_semantic_cache_hit_ends_active_server_span_once(setup_unengaged):
+    import vllm_router.services.request_service.request as request_module
+
+    req, _ = setup_unengaged
+    req.app.state.otel_enabled = True
+    req.app.state.semantic_cache_available = True
+    cached = MagicMock()
+    cached.headers = {}
+    span = MagicMock()
+
+    with (
+        patch.object(
+            request_module, "check_semantic_cache", new_callable=AsyncMock, create=True
+        ) as cache,
+        patch.object(request_module, "semantic_cache_available", True),
+        patch.object(request_module, "otel_available", True),
+        patch.object(request_module, "extract_context", return_value=MagicMock()),
+        patch.object(request_module, "start_span", return_value=(span, MagicMock())),
+        patch.object(request_module, "end_span") as end_span,
+        patch.object(request_module, "process_request") as process,
+    ):
+        cache.return_value = cached
+        response = await request_module.route_general_request(
+            req, "/v1/chat/completions", MagicMock()
+        )
+
+    assert response is cached
+    assert cached.headers["X-Request-Id"]
+    end_span.assert_called_once_with(span, status_code=200)
+    process.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_semantic_cache_lookup_uses_body_changing_rewriter_output(
     setup_unengaged,
 ):
@@ -440,10 +474,11 @@ async def test_semantic_cache_optional_extra_disabled_is_safe(setup_unengaged):
 @pytest.mark.asyncio
 async def test_non_streaming_repairs_and_sets_content_length(setup_engaged):
     req, _ = setup_engaged
+    corrupt_document = '{{"summary": "café ☕"}'
 
     async def backend(*a, **kw):
         yield {"content-type": "application/json"}, 200
-        yield _non_streaming_body('{{"summary": "x"}')
+        yield _non_streaming_body(corrupt_document)
 
     with patch(
         "vllm_router.services.request_service.request.process_request",
@@ -454,8 +489,151 @@ async def test_non_streaming_repairs_and_sets_content_length(setup_engaged):
         resp = await route_general_request(req, "/v1/chat/completions", MagicMock())
 
     body = await _collect(resp)
-    assert json.loads(body)["choices"][0]["message"]["content"] == '{"summary": "x"}'
+    repaired = json.loads(body)["choices"][0]["message"]["content"]
+    repaired_document = json.loads(repaired)
+    jsonschema.validate(repaired_document, STRICT)
+    assert repaired_document == {"summary": "café ☕"}
+    assert "café ☕".encode() in body
+    assert b"\\u00e9" not in body
+    assert b"\\u2615" not in body
     assert resp.headers["content-length"] == str(len(body))
+
+
+@pytest.mark.asyncio
+async def test_streaming_realistic_vllm_response_repairs_end_to_end():
+    req, patches = _make_request(_request_body(engaged=True, stream=True))
+    reasoning_frames = [
+        _chunk(
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "Inspect the requested format.",
+            }
+        ),
+        _chunk(
+            {
+                "content": None,
+                "reasoning_content": "Now produce the final JSON.",
+            }
+        ),
+    ]
+    content_frames = [
+        _chunk({"content": '{{"summary": "'}),
+        _chunk({"content": "café "}),
+        _chunk({"content": '☕"}'}, finish_reason="stop"),
+    ]
+    usage_payload = {
+        "id": "x",
+        "object": "chat.completion.chunk",
+        "choices": [],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+    }
+    usage_frame = f"data: {json.dumps(usage_payload)}\n\n".encode()
+    done = b"data: [DONE]\n\n"
+
+    async def backend(*args, **kwargs):
+        yield {"content-type": "text/event-stream"}, 200
+        for frame in reasoning_frames + content_frames + [usage_frame, done]:
+            yield frame
+
+    for active_patch in patches:
+        active_patch.start()
+    try:
+        with (
+            patch(
+                "vllm_router.services.request_service.request.process_request",
+                side_effect=backend,
+            ),
+            patch(
+                "vllm_router.services.request_service.request._record_repair_metrics"
+            ) as record_metrics,
+        ):
+            from vllm_router.services.request_service.request import (
+                route_general_request,
+            )
+
+            response = await route_general_request(
+                req, "/v1/chat/completions", MagicMock()
+            )
+            iterator = response.body_iterator.__aiter__()
+
+            # Reasoning frames with vLLM's content:null preamble are forwarded
+            # before the content stream finishes, without byte-level rewriting.
+            received = [await iterator.__anext__(), await iterator.__anext__()]
+            assert received == reasoning_frames
+
+            received.append(await iterator.__anext__())
+            with pytest.raises(StopAsyncIteration):
+                await iterator.__anext__()
+
+        streamed = b"".join(received)
+        payloads = []
+        for raw_event in streamed.split(b"\n\n"):
+            if raw_event.startswith(b"data: {"):
+                payloads.append(json.loads(raw_event.removeprefix(b"data: ")))
+
+        reassembled_content = "".join(
+            delta["content"]
+            for payload in payloads
+            for choice in payload.get("choices", [])
+            if isinstance((delta := choice.get("delta")), dict)
+            and isinstance(delta.get("content"), str)
+        )
+        repaired_document = json.loads(reassembled_content)
+        jsonschema.validate(repaired_document, STRICT)
+        assert repaired_document == {"summary": "café ☕"}
+        assert usage_frame in streamed
+        assert "café ☕".encode() in streamed
+        assert b"\\u00e9" not in streamed
+        assert b"\\u2615" not in streamed
+        assert streamed.count(done) == 1
+        assert streamed.endswith(done)
+
+        record_metrics.assert_called_once()
+        telemetry = record_metrics.call_args.args[0]
+        assert [event.status for event in telemetry] == ["repaired"]
+    finally:
+        for active_patch in reversed(patches):
+            active_patch.stop()
+
+
+@pytest.mark.asyncio
+async def test_streaming_feature_flag_off_is_byte_identical():
+    req, patches = _make_request(_request_body(engaged=True, stream=True))
+    req.app.state.structured_output_repair_enabled = False
+    frames = [
+        _chunk({"content": None, "reasoning_content": "reasoning"}),
+        _chunk({"content": '{{"summary": "'}),
+        _chunk({"content": "café "}),
+        _chunk({"content": '☕"}'}, finish_reason="stop"),
+        b'data: {"choices":[],"usage":{"total_tokens":18}}\n\n',
+        b"data: [DONE]\n\n",
+    ]
+
+    async def backend(*args, **kwargs):
+        yield {"content-type": "text/event-stream"}, 200
+        for frame in frames:
+            yield frame
+
+    for active_patch in patches:
+        active_patch.start()
+    try:
+        with patch(
+            "vllm_router.services.request_service.request.process_request",
+            side_effect=backend,
+        ):
+            from vllm_router.services.request_service.request import (
+                route_general_request,
+            )
+
+            response = await route_general_request(
+                req, "/v1/chat/completions", MagicMock()
+            )
+
+        assert await _collect(response) == b"".join(frames)
+    finally:
+        for active_patch in reversed(patches):
+            active_patch.stop()
 
 
 @pytest.mark.asyncio
@@ -520,6 +698,53 @@ async def test_streaming_refusal_is_sent_to_configured_capture_sink():
     assert call.kwargs["model"] == "m"
     assert call.kwargs["output"] == "not json"
     assert call.kwargs["telemetry"].status == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_conflicting_schema_carriers_increment_rejection_metric():
+    body = _request_body(engaged=True)
+    body["structured_outputs"] = {
+        "json": {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+        }
+    }
+    req, patches = _make_request(body)
+    original = _non_streaming_body('{{"summary": "x"}')
+
+    async def backend(*args, **kwargs):
+        yield {"content-type": "application/json"}, 200
+        yield original
+
+    for active_patch in patches:
+        active_patch.start()
+    try:
+        with (
+            patch(
+                "vllm_router.services.request_service.request.process_request",
+                side_effect=backend,
+            ),
+            patch(
+                "vllm_router.services.request_service.request.structured_output_schema_rejections_total.labels"
+            ) as rejection_labels,
+        ):
+            from vllm_router.services.request_service.request import (
+                route_general_request,
+            )
+
+            response = await route_general_request(
+                req, "/v1/chat/completions", MagicMock()
+            )
+            assert await _collect(response) == original
+
+        rejection_labels.assert_called_once_with(
+            model="m", reason="conflicting_carriers"
+        )
+        rejection_labels.return_value.inc.assert_called_once_with()
+    finally:
+        for active_patch in reversed(patches):
+            active_patch.stop()
 
 
 @pytest.mark.asyncio

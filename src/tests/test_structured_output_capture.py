@@ -149,8 +149,12 @@ def test_rejects_insecure_directory(tmp_path):
         SecureJSONLCaptureSink(directory)
 
 
-def test_missing_directory_raises_file_not_found(tmp_path):
-    with pytest.raises(FileNotFoundError):
+def test_missing_directory_raises_actionable_value_error(tmp_path):
+    requirement = (
+        "--structured-output-repair-capture-dir must exist, be owned by the "
+        "router's uid, and have mode 0700"
+    )
+    with pytest.raises(ValueError, match=requirement):
         SecureJSONLCaptureSink(tmp_path / "missing")
 
 

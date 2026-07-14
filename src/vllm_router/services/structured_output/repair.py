@@ -13,6 +13,8 @@ from referencing.exceptions import NoSuchResource
 
 from vllm_router.services.structured_output.json_prefix import is_valid_json_prefix
 
+MAX_REPAIR_CONTENT_BYTES = 262_144
+
 
 @dataclass(frozen=True)
 class RepairResult:
@@ -31,7 +33,7 @@ def repair_tool_arguments(
     *,
     finish_reason: str | None,
 ) -> RepairResult:
-    """Repair arguments using the matching tool's parameters schema."""
+    """Repair tool arguments; intentionally not wired into the v1 response path."""
     return repair(arguments, parameters_schema, finish_reason=finish_reason)
 
 
@@ -63,6 +65,11 @@ def _repair(
     *,
     max_prefix_bytes: int,
 ) -> RepairResult:
+    if len(content) > MAX_REPAIR_CONTENT_BYTES:
+        return _empty_result("unknown")
+    if len(content.encode("utf-8", errors="surrogatepass")) > MAX_REPAIR_CONTENT_BYTES:
+        return _empty_result("unknown")
+
     validator = _validator(schema)
 
     try:

@@ -130,21 +130,21 @@ _REPAIR_MODES = frozenset({"none", "code_fence", "extra_brace", "dup_prefix", "o
 _REPAIRED_STATUS = "repaired"
 _UNKNOWN_STATUS = "unknown"
 _OTHER_MODE = "other"
-_NON_DISCRIMINATING_REASON = "non_discriminating"
+_SCHEMA_REJECTION_REASONS = frozenset({"non_discriminating", "conflicting_carriers"})
 
 
 def _record_repair_metrics(
     telemetry,
     requested_model,
     *,
-    rejected_non_discriminating=False,
+    rejection_reason=None,
 ) -> None:
     """Metrics are fail-safe and receive no raw model output."""
     try:
-        if rejected_non_discriminating:
+        if rejection_reason in _SCHEMA_REJECTION_REASONS:
             structured_output_schema_rejections_total.labels(
                 model=requested_model,
-                reason=_NON_DISCRIMINATING_REASON,
+                reason=rejection_reason,
             ).inc()
         for event in telemetry:
             status = (
@@ -561,6 +561,8 @@ async def route_general_request(
             request_json=request_json,
         )
         if cache_response:
+            end_span(span, status_code=200) if tracing_active else None
+            cache_response.headers["X-Request-Id"] = request_id
             return cache_response
 
     service_discovery = get_service_discovery()
@@ -779,8 +781,8 @@ async def route_general_request(
         _record_repair_metrics(
             [],
             requested_model,
-            rejected_non_discriminating=(
-                200 <= status < 300 and candidate_contract.rejected_non_discriminating
+            rejection_reason=(
+                candidate_contract.rejection_reason if 200 <= status < 300 else None
             ),
         )
         return StreamingResponse(

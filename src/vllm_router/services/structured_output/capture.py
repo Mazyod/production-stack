@@ -100,15 +100,20 @@ class SecureJSONLCaptureSink:
         self._validate_directory()
 
     def _validate_directory(self) -> None:
-        stat_result = self._directory.lstat()
+        requirement = (
+            "--structured-output-repair-capture-dir must exist, be owned by the "
+            "router's uid, and have mode 0700"
+        )
+        try:
+            stat_result = self._directory.lstat()
+        except FileNotFoundError as exc:
+            raise ValueError(requirement) from exc
         if (
             not stat.S_ISDIR(stat_result.st_mode)
             or stat_result.st_uid != os.geteuid()
             or stat_result.st_mode & 0o777 != 0o700
         ):
-            raise ValueError(
-                "capture directory must be owned by the router uid and mode 0700"
-            )
+            raise ValueError(requirement)
 
     def _capture_paths(self) -> Iterator[Path]:
         for path in self._directory.iterdir():

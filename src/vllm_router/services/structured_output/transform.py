@@ -136,7 +136,8 @@ def _transform_response_body(
                 continue
             result = _repair_choice(choice, contract)
             if result is None:
-                continue
+                telemetry.append(_NO_TERMINAL_TELEMETRY)
+                return body, telemetry
             _capture_refusal(
                 capture_callback,
                 choice["message"]["content"],
@@ -146,6 +147,8 @@ def _transform_response_body(
             if result.status == "repaired":
                 choice["message"]["content"] = result.text
                 changed = True
+            elif result.status != "clean":
+                return body, [item for item in telemetry if item.status != "repaired"]
     except Exception:  # noqa: BLE001 - a repair failure must never break a response
         _warn_transform_failure()
         return body, []

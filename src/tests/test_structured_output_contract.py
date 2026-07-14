@@ -98,6 +98,7 @@ def test_not_engaged_on_non_discriminating_schema():
     c = extract_output_contract(_req(response_format=_rf({"type": "object"})))
     assert c.engaged is False
     assert c.rejected_non_discriminating is True
+    assert c.rejection_reason == "non_discriminating"
 
 
 def test_engages_on_additional_properties_false_without_required():
@@ -162,6 +163,7 @@ def test_non_dict_structured_outputs_schema_conflicts_with_response_format():
     )
     assert contract.engaged is False
     assert contract.rejected_non_discriminating is False
+    assert contract.rejection_reason == "conflicting_carriers"
 
 
 def test_different_discriminating_schemas_in_both_carriers_do_not_engage():
@@ -178,6 +180,7 @@ def test_different_discriminating_schemas_in_both_carriers_do_not_engage():
     )
     assert contract.engaged is False
     assert contract.rejected_non_discriminating is False
+    assert contract.rejection_reason == "conflicting_carriers"
 
 
 def test_discriminating_and_non_discriminating_carriers_do_not_engage():
@@ -189,6 +192,7 @@ def test_discriminating_and_non_discriminating_carriers_do_not_engage():
     )
     assert contract.engaged is False
     assert contract.rejected_non_discriminating is False
+    assert contract.rejection_reason == "conflicting_carriers"
 
 
 def test_only_structured_outputs_json_engages():

@@ -9,11 +9,15 @@ from typing import Any
 @dataclass(frozen=True)
 class OutputContract:
     content_schema: dict[str, Any] | None = None
-    rejected_non_discriminating: bool = False
+    rejection_reason: str | None = None
 
     @property
     def engaged(self) -> bool:
         return self.content_schema is not None
+
+    @property
+    def rejected_non_discriminating(self) -> bool:
+        return self.rejection_reason == "non_discriminating"
 
 
 def _schema_disposition(schema: Any) -> str:
@@ -47,7 +51,9 @@ def _schema_disposition(schema: Any) -> str:
     return "non_discriminating"
 
 
-def _content_schema(request_json: dict[str, Any]) -> tuple[dict[str, Any] | None, bool]:
+def _content_schema(
+    request_json: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
     candidates: list[Any] = []
     response_format = request_json.get("response_format")
     if (
@@ -69,15 +75,16 @@ def _content_schema(request_json: dict[str, Any]) -> tuple[dict[str, Any] | None
     if len(candidates) > 1 and any(
         schema != candidates[0] for schema in candidates[1:]
     ):
-        return None, False
+        return None, "conflicting_carriers"
 
-    rejected = False
+    rejection_reason = None
     for schema in candidates:
         disposition = _schema_disposition(schema)
         if disposition == "repairable":
-            return schema, rejected
-        rejected = rejected or disposition == "non_discriminating"
-    return None, rejected
+            return schema, rejection_reason
+        if disposition == "non_discriminating":
+            rejection_reason = "non_discriminating"
+    return None, rejection_reason
 
 
 def extract_output_contract(request_json: dict[str, Any]) -> OutputContract:
@@ -95,7 +102,7 @@ def extract_output_contract(request_json: dict[str, Any]) -> OutputContract:
         ):
             return OutputContract()
 
-        content_schema, rejected = _content_schema(request_json)
-        return OutputContract(content_schema, rejected)
+        content_schema, rejection_reason = _content_schema(request_json)
+        return OutputContract(content_schema, rejection_reason)
     except Exception:  # noqa: BLE001 - engagement must never break a request
         return OutputContract()

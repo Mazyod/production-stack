@@ -50,7 +50,7 @@ def test_missing_finish_reason_passes_through_unchanged():
 
     assert out is body
     assert json.loads(out)["choices"][0]["message"]["content"] == '{{"summary": "x"}'
-    assert telemetry == []
+    assert telemetry == [RepairTelemetry("no_terminal", "other", 0)]
 
 
 def test_null_finish_reason_passes_through_unchanged():
@@ -60,7 +60,21 @@ def test_null_finish_reason_passes_through_unchanged():
 
     assert out is body
     assert json.loads(out)["choices"][0]["message"]["content"] == '{{"summary": "x"}'
-    assert telemetry == []
+    assert telemetry == [RepairTelemetry("no_terminal", "other", 0)]
+
+
+def test_non_streaming_missing_message_and_unusable_content_emit_no_terminal():
+    for choice in (
+        {"finish_reason": "stop"},
+        {"message": {"content": None}, "finish_reason": "stop"},
+        {"message": {"content": ""}, "finish_reason": "stop"},
+    ):
+        body = json.dumps({"choices": [choice]}).encode()
+
+        out, telemetry = transform_response_body(body, CONTRACT)
+
+        assert out is body
+        assert telemetry == [RepairTelemetry("no_terminal", "other", 0)]
 
 
 def test_clean_body_is_byte_identical():
@@ -186,7 +200,7 @@ def test_logger_failure_is_contained(monkeypatch):
     assert telemetry == []
 
 
-def test_partial_repair_with_multiple_choices_is_deliberate():
+def test_multiple_choices_are_repaired_all_or_nothing():
     repairable = '{{"summary": "repair me"}'
     unrepairable = "not JSON"
     body = json.dumps(
@@ -209,13 +223,10 @@ def test_partial_repair_with_multiple_choices_is_deliberate():
 
     out, telemetry = transform_response_body(body, CONTRACT)
 
-    # Repair what we can; never worsen what we can't.
-    choices = json.loads(out)["choices"]
-    repaired_document = json.loads(choices[0]["message"]["content"])
-    jsonschema.validate(repaired_document, STRICT)
-    assert repaired_document == {"summary": "repair me"}
-    assert choices[1]["message"]["content"] == unrepairable
-    assert [entry.status for entry in telemetry] == ["repaired", "unknown"]
+    assert out is body
+    assert json.loads(out)["choices"][0]["message"]["content"] == repairable
+    assert json.loads(out)["choices"][1]["message"]["content"] == unrepairable
+    assert telemetry == [RepairTelemetry("unknown", "other", 0)]
 
 
 def _chunk(delta, finish_reason=None, index=0):

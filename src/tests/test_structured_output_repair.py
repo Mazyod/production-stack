@@ -1,14 +1,18 @@
 import json
+from importlib import import_module
 
 import jsonschema
 import pytest
 
 from vllm_router.services.structured_output.json_prefix import is_valid_json_prefix
 from vllm_router.services.structured_output.repair import (
+    MAX_REPAIR_CONTENT_BYTES,
     _compiled_validator,
     repair,
     repair_tool_arguments,
 )
+
+repair_module = import_module("vllm_router.services.structured_output.repair")
 
 OBJECT_SCHEMA = {
     "type": "object",
@@ -150,6 +154,30 @@ def test_invalid_scalar_root_is_unknown_without_candidate_search():
 
     assert result.status == "unknown"
     assert result.candidates_tried == 0
+
+
+def test_content_over_byte_cap_is_unknown_without_invoking_validator(monkeypatch):
+    validator_called = False
+
+    def observe_validator(schema):
+        nonlocal validator_called
+        validator_called = True
+        raise AssertionError("validator must not run above the content cap")
+
+    monkeypatch.setattr(repair_module, "_validator", observe_validator)
+    content = "é" * (MAX_REPAIR_CONTENT_BYTES // 2 + 1)
+    catastrophic_schema = {
+        **OBJECT_SCHEMA,
+        "properties": {"summary": {"type": "string", "pattern": "^(a+)+$"}},
+    }
+
+    result = repair(content, catastrophic_schema, finish_reason="stop")
+
+    assert len(content) < MAX_REPAIR_CONTENT_BYTES
+    assert len(content.encode()) > MAX_REPAIR_CONTENT_BYTES
+    assert result.status == "unknown"
+    assert result.candidates_tried == 0
+    assert validator_called is False
 
 
 def test_ambiguous_object_truncation():
