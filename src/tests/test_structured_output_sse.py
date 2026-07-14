@@ -1,3 +1,5 @@
+import time
+
 from vllm_router.services.structured_output.sse import SSEParser
 
 
@@ -70,3 +72,24 @@ def test_raw_bytes_roundtrip_exactly():
     p = SSEParser()
     events = p.feed(stream)
     assert b"".join(e.raw for e in events) + p.flush() == stream
+
+
+def test_raw_bytes_roundtrip_exactly_when_every_byte_is_a_chunk():
+    stream = b'data: {"a": 1}\r\n\r\n: hb\n\ndata: [DONE]\n\nunterminated'
+    parser = SSEParser()
+    events = []
+    for byte in stream:
+        events.extend(parser.feed(bytes((byte,))))
+
+    assert b"".join(event.raw for event in events) + parser.flush() == stream
+
+
+def test_unterminated_one_byte_chunks_parse_under_hard_time_bound():
+    parser = SSEParser()
+    started = time.perf_counter()
+    for _ in range(200_000):
+        assert parser.feed(b"x") == []
+    elapsed = time.perf_counter() - started
+
+    assert parser.buffered_bytes == 200_000
+    assert elapsed < 1.0, f"incremental SSE scan took {elapsed:.6f}s"

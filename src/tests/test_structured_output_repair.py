@@ -1,4 +1,5 @@
 import json
+import time
 from importlib import import_module
 
 import jsonschema
@@ -178,6 +179,36 @@ def test_content_over_byte_cap_is_unknown_without_invoking_validator(monkeypatch
     assert result.status == "unknown"
     assert result.candidates_tried == 0
     assert validator_called is False
+
+
+def test_catastrophic_regex_schema_returns_unknown_under_hard_time_bound():
+    schema = {
+        **OBJECT_SCHEMA,
+        "properties": {
+            "summary": {"type": "string", "pattern": "^(a+)+$"},
+        },
+    }
+    content = '{{"summary": "' + "a" * 28 + '!"}'
+
+    started = time.perf_counter()
+    result = repair(content, schema, finish_reason="stop")
+    elapsed = time.perf_counter() - started
+
+    assert result.status == "unknown"
+    assert elapsed < 0.1, f"unsafe regex guard took {elapsed:.6f}s"
+
+
+def test_length_finish_reason_remains_sticky_with_regex_schema():
+    schema = {
+        **OBJECT_SCHEMA,
+        "properties": {
+            "summary": {"type": "string", "pattern": "^(a+)+$"},
+        },
+    }
+
+    result = repair('{{"summary": "partial', schema, finish_reason="length")
+
+    assert result.status == "incomplete"
 
 
 def test_ambiguous_object_truncation():

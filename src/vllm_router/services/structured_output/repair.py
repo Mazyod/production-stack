@@ -11,6 +11,7 @@ import jsonschema
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
+from vllm_router.services.structured_output.contract import schema_has_unsafe_regex
 from vllm_router.services.structured_output.json_prefix import is_valid_json_prefix
 
 MAX_REPAIR_CONTENT_BYTES = 262_144
@@ -54,6 +55,8 @@ def repair(
     try:
         if finish_reason == "length":
             return _empty_result("incomplete")
+        if schema_has_unsafe_regex(schema):
+            return _empty_result("unknown")
         return _repair(content, schema, max_prefix_bytes=max_prefix_bytes)
     except Exception:
         return _empty_result("unknown")

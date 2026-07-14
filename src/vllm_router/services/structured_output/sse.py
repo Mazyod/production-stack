@@ -54,6 +54,7 @@ def _classify(frame: bytes) -> tuple[str | None, bool]:
 class SSEParser:
     def __init__(self) -> None:
         self._buffer = bytearray()
+        self._scan_cursor = 0
 
     @property
     def buffered_bytes(self) -> int:
@@ -62,26 +63,39 @@ class SSEParser:
     def feed(self, chunk: bytes) -> list[SSEEvent]:
         self._buffer.extend(chunk)
         events: list[SSEEvent] = []
+        consumed = 0
+        scan_from = self._scan_cursor
 
         while True:
             cut = -1
             width = 0
             for terminator in _TERMINATORS:
-                found = self._buffer.find(terminator)
+                found = self._buffer.find(terminator, scan_from)
                 if found != -1 and (cut == -1 or found < cut):
                     cut = found
                     width = len(terminator)
             if cut == -1:
+                # Only the last three bytes can begin a terminator completed by a
+                # future chunk. Never rescan the older prefix.
+                self._scan_cursor = max(scan_from, len(self._buffer) - 3)
                 break
 
-            raw = bytes(self._buffer[: cut + width])
-            del self._buffer[: cut + width]
-            data, is_done = _classify(raw[: -width or None])
+            end = cut + width
+            raw = bytes(self._buffer[consumed:end])
+            frame = bytes(self._buffer[consumed:cut])
+            data, is_done = _classify(frame)
             events.append(SSEEvent(raw=raw, data=data, is_done=is_done))
+            consumed = end
+            scan_from = end
+
+        if consumed:
+            del self._buffer[:consumed]
+            self._scan_cursor = max(0, self._scan_cursor - consumed)
 
         return events
 
     def flush(self) -> bytes:
         tail = bytes(self._buffer)
         self._buffer.clear()
+        self._scan_cursor = 0
         return tail

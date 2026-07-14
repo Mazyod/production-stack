@@ -312,6 +312,19 @@ def test_cap_counts_large_unterminated_parser_tail():
     assert r.feed(b"after") == b"after"
 
 
+def test_cap_preflight_replays_oversized_chunk_without_parser_scan(monkeypatch):
+    r = StreamRepairer(CONTRACT, max_buffered_bytes=32)
+    original = b"data: " + b"x" * 200
+
+    def parser_feed_must_not_run(chunk):
+        raise AssertionError("oversized chunks must be rejected before SSE parsing")
+
+    monkeypatch.setattr(r._parser, "feed", parser_feed_must_not_run)
+
+    assert r.feed(original) == original
+    assert r.telemetry == [RepairTelemetry("capped", "other", 0)]
+
+
 def test_done_without_finish_reason_replays():
     r = StreamRepairer(CONTRACT)
     frame = _chunk({"content": '{{"summary": "x"}'})

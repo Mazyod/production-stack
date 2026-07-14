@@ -500,6 +500,76 @@ async def test_non_streaming_repairs_and_sets_content_length(setup_engaged):
 
 
 @pytest.mark.asyncio
+async def test_non_streaming_byte_cap_replays_entire_backend_response(setup_engaged):
+    req, _ = setup_engaged
+    req.app.state.structured_output_repair_max_bytes = 16
+    original = _non_streaming_body('{{"summary": "x"}')
+    chunks = [original[:10], original[10:30], original[30:]]
+
+    async def backend(*args, **kwargs):
+        yield {"content-type": "application/json"}, 200
+        for chunk in chunks:
+            yield chunk
+
+    with (
+        patch(
+            "vllm_router.services.request_service.request.process_request",
+            side_effect=backend,
+        ),
+        patch(
+            "vllm_router.services.request_service.request._record_repair_metrics"
+        ) as record_metrics,
+    ):
+        from vllm_router.services.request_service.request import route_general_request
+
+        response = await route_general_request(req, "/v1/chat/completions", MagicMock())
+        received = await _collect(response)
+
+    assert received == original
+    telemetry = record_metrics.call_args.args[0]
+    assert [event.status for event in telemetry] == ["capped"]
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_deadline_replays_entire_backend_response(setup_engaged):
+    req, _ = setup_engaged
+    req.app.state.structured_output_repair_max_seconds = 0.01
+    release = asyncio.Event()
+    original = _non_streaming_body('{{"summary": "x"}')
+    first, second = original[:20], original[20:]
+
+    async def backend(*args, **kwargs):
+        yield {"content-type": "application/json"}, 200
+        yield first
+        await release.wait()
+        yield second
+
+    with (
+        patch(
+            "vllm_router.services.request_service.request.process_request",
+            side_effect=backend,
+        ),
+        patch(
+            "vllm_router.services.request_service.request._record_repair_metrics"
+        ) as record_metrics,
+    ):
+        from vllm_router.services.request_service.request import route_general_request
+
+        response = await asyncio.wait_for(
+            route_general_request(req, "/v1/chat/completions", MagicMock()),
+            timeout=0.2,
+        )
+        collected = asyncio.create_task(_collect(response))
+        await asyncio.sleep(0)
+        release.set()
+        received = await asyncio.wait_for(collected, timeout=0.2)
+
+    assert received == original
+    telemetry = record_metrics.call_args.args[0]
+    assert [event.status for event in telemetry] == ["timeout"]
+
+
+@pytest.mark.asyncio
 async def test_streaming_realistic_vllm_response_repairs_end_to_end():
     req, patches = _make_request(_request_body(engaged=True, stream=True))
     reasoning_frames = [
@@ -741,6 +811,50 @@ async def test_conflicting_schema_carriers_increment_rejection_metric():
         rejection_labels.assert_called_once_with(
             model="m", reason="conflicting_carriers"
         )
+        rejection_labels.return_value.inc.assert_called_once_with()
+    finally:
+        for active_patch in reversed(patches):
+            active_patch.stop()
+
+
+@pytest.mark.asyncio
+async def test_unsafe_regex_schema_increments_rejection_metric():
+    body = _request_body(engaged=True)
+    body["response_format"]["json_schema"]["schema"] = {
+        **STRICT,
+        "properties": {
+            "summary": {"type": "string", "pattern": "^(a+)+$"},
+        },
+    }
+    req, patches = _make_request(body)
+    original = _non_streaming_body('{{"summary": "x"}')
+
+    async def backend(*args, **kwargs):
+        yield {"content-type": "application/json"}, 200
+        yield original
+
+    for active_patch in patches:
+        active_patch.start()
+    try:
+        with (
+            patch(
+                "vllm_router.services.request_service.request.process_request",
+                side_effect=backend,
+            ),
+            patch(
+                "vllm_router.services.request_service.request.structured_output_schema_rejections_total.labels"
+            ) as rejection_labels,
+        ):
+            from vllm_router.services.request_service.request import (
+                route_general_request,
+            )
+
+            response = await route_general_request(
+                req, "/v1/chat/completions", MagicMock()
+            )
+            assert await _collect(response) == original
+
+        rejection_labels.assert_called_once_with(model="m", reason="unsafe_regex")
         rejection_labels.return_value.inc.assert_called_once_with()
     finally:
         for active_patch in reversed(patches):

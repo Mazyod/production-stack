@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+_REGEX_KEYWORDS = frozenset({"pattern", "patternProperties"})
+_MAX_SCHEMA_NODES = 10_000
+_MAX_SCHEMA_DEPTH = 128
+
 
 @dataclass(frozen=True)
 class OutputContract:
@@ -51,6 +55,42 @@ def _schema_disposition(schema: Any) -> str:
     return "non_discriminating"
 
 
+def schema_has_unsafe_regex(schema: Any) -> bool:
+    """Return whether a schema has regex semantics or cannot be inspected safely.
+
+    Repeated containers are rejected as well as over-deep/over-large schemas. JSON
+    schemas arriving over HTTP are trees, so repetition by identity indicates an
+    in-process cyclic or otherwise non-JSON input. Failing closed keeps this public
+    boundary total without recursive traversal.
+    """
+    stack = [(schema, 0)]
+    seen_containers: set[int] = set()
+    nodes = 0
+
+    while stack:
+        value, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_SCHEMA_NODES or depth > _MAX_SCHEMA_DEPTH:
+            return True
+
+        if isinstance(value, dict):
+            identity = id(value)
+            if identity in seen_containers:
+                return True
+            seen_containers.add(identity)
+            if any(keyword in value for keyword in _REGEX_KEYWORDS):
+                return True
+            stack.extend((child, depth + 1) for child in value.values())
+        elif isinstance(value, list):
+            identity = id(value)
+            if identity in seen_containers:
+                return True
+            seen_containers.add(identity)
+            stack.extend((child, depth + 1) for child in value)
+
+    return False
+
+
 def _content_schema(
     request_json: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -71,6 +111,9 @@ def _content_schema(
         schema = structured_outputs.get("json")
         if schema is not None:
             candidates.append(schema)
+
+    if any(schema_has_unsafe_regex(schema) for schema in candidates):
+        return None, "unsafe_regex"
 
     if len(candidates) > 1 and any(
         schema != candidates[0] for schema in candidates[1:]

@@ -24,6 +24,75 @@ def test_engages_on_strict_object_schema():
     assert c.content_schema == STRICT
 
 
+def test_rejects_regex_pattern_with_unsafe_regex_reason():
+    schema = {
+        **STRICT,
+        "properties": {
+            "summary": {"type": "string", "pattern": "^(a+)+$"},
+        },
+    }
+
+    contract = extract_output_contract(_req(response_format=_rf(schema)))
+
+    assert contract.engaged is False
+    assert contract.rejection_reason == "unsafe_regex"
+
+
+def test_rejects_regex_pattern_nested_under_properties_items():
+    schema = {
+        **STRICT,
+        "properties": {
+            "x": {
+                "type": "array",
+                "items": {"type": "string", "pattern": "^safe$"},
+            }
+        },
+    }
+
+    contract = extract_output_contract(_req(response_format=_rf(schema)))
+
+    assert contract.engaged is False
+    assert contract.rejection_reason == "unsafe_regex"
+
+
+def test_rejects_pattern_properties():
+    schema = {
+        **STRICT,
+        "patternProperties": {"^x": {"type": "string"}},
+    }
+
+    contract = extract_output_contract(_req(response_format=_rf(schema)))
+
+    assert contract.engaged is False
+    assert contract.rejection_reason == "unsafe_regex"
+
+
+def test_regex_scan_does_not_overfire_on_ordinary_nested_schema():
+    schema = {
+        **STRICT,
+        "$defs": {"value": {"type": "string", "minLength": 1}},
+        "properties": {
+            "summary": {"$ref": "#/$defs/value"},
+            "values": {"type": "array", "items": {"type": "integer"}},
+        },
+    }
+
+    contract = extract_output_contract(_req(response_format=_rf(schema)))
+
+    assert contract.engaged is True
+    assert contract.content_schema == schema
+
+
+def test_cyclic_schema_is_refused_without_spinning():
+    schema = dict(STRICT)
+    schema["$defs"] = {"cycle": schema}
+
+    contract = extract_output_contract(_req(response_format=_rf(schema)))
+
+    assert contract.engaged is False
+    assert contract.rejection_reason == "unsafe_regex"
+
+
 def test_not_engaged_without_response_format():
     assert extract_output_contract(_req()).engaged is False
 

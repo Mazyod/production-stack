@@ -130,7 +130,9 @@ _REPAIR_MODES = frozenset({"none", "code_fence", "extra_brace", "dup_prefix", "o
 _REPAIRED_STATUS = "repaired"
 _UNKNOWN_STATUS = "unknown"
 _OTHER_MODE = "other"
-_SCHEMA_REJECTION_REASONS = frozenset({"non_discriminating", "conflicting_carriers"})
+_SCHEMA_REJECTION_REASONS = frozenset(
+    {"non_discriminating", "conflicting_carriers", "unsafe_regex"}
+)
 
 
 def _record_repair_metrics(
@@ -804,11 +806,83 @@ async def route_general_request(
                 telemetry=event,
             )
 
+    max_bytes = getattr(
+        request.app.state, "structured_output_repair_max_bytes", 1_048_576
+    )
+    max_seconds = getattr(
+        request.app.state, "structured_output_repair_max_seconds", 30.0
+    )
+
     if not request_json.get("stream", False):
         body = bytearray()
+        iterator = traced_stream().__aiter__()
+        read = None
+        collection_started_at = time.monotonic()
+
+        def fallback_response(telemetry):
+            retained = bytes(body)
+            pending_read = read
+            _record_repair_metrics([telemetry], requested_model)
+
+            async def replay_then_relay():
+                pending = pending_read
+                try:
+                    if retained:
+                        yield retained
+                    if pending is not None:
+                        try:
+                            chunk = await pending
+                        except StopAsyncIteration:
+                            pending = None
+                            return
+                        pending = None
+                        yield chunk
+                    async for chunk in iterator:
+                        yield chunk
+                finally:
+                    if pending is not None and not pending.done():
+                        pending.cancel()
+                        try:
+                            await pending
+                        except BaseException:
+                            pass
+                    try:
+                        await iterator.aclose()
+                    except BaseException:
+                        pass
+
+            return StreamingResponse(
+                replay_then_relay(),
+                status_code=status,
+                headers=headers_dict,
+                media_type=media_type,
+            )
+
         try:
-            async for chunk in traced_stream():
+            while True:
+                seconds_remaining = max(
+                    0.0,
+                    max_seconds - (time.monotonic() - collection_started_at),
+                )
+                if seconds_remaining == 0.0:
+                    return fallback_response(RepairTelemetry("timeout", "other", 0))
+
+                read = asyncio.ensure_future(iterator.__anext__())
+                try:
+                    chunk = await asyncio.wait_for(
+                        asyncio.shield(read),
+                        timeout=seconds_remaining,
+                    )
+                except asyncio.TimeoutError:
+                    return fallback_response(RepairTelemetry("timeout", "other", 0))
+                except StopAsyncIteration:
+                    read = None
+                    break
+
+                read = None
                 body.extend(chunk)
+                if len(body) > max_bytes:
+                    return fallback_response(RepairTelemetry("capped", "other", 0))
         except Exception as exc:
 
             async def replay_then_raise(retained=bytes(body), error=exc):
@@ -834,13 +908,6 @@ async def route_general_request(
             headers=headers_dict,
             media_type=media_type,
         )
-
-    max_bytes = getattr(
-        request.app.state, "structured_output_repair_max_bytes", 1_048_576
-    )
-    max_seconds = getattr(
-        request.app.state, "structured_output_repair_max_seconds", 30.0
-    )
 
     async def repaired_stream():
         repairer = StreamRepairer(

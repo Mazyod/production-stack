@@ -410,6 +410,14 @@ class StreamRepairer:
             )
             return self._disable_and_replay(telemetry=(_ERROR_TELEMETRY,)) + chunk
 
+        if (
+            self._retained_bytes + self._parser.buffered_bytes + len(chunk)
+            > self._max_buffered_bytes
+        ):
+            # The parser tail precedes this not-yet-fed chunk. Flush it before
+            # appending the raw chunk so replay remains byte exact.
+            return self._disable_and_replay(telemetry=(_CAPPED_TELEMETRY,)) + chunk
+
         try:
             events = self._parser.feed(chunk)
             for position, event in enumerate(events):
