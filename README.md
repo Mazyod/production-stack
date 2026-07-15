@@ -12,6 +12,7 @@ This is a lightweight fork of [vllm-project/production-stack](https://github.com
 - **Default port 8080**: Changed from 8001 to match the [vllm-project/router](https://github.com/vllm-project/router) default for easier future migration.
 - **numpy unpinned**: `>=1.26.4` instead of `==1.26.4` (no Python 3.13 wheels for 1.26.4).
 - **Structured-output boundary repair**: `--enable-structured-output-repair` (off by default) repairs vLLM's grammar-constrained JSON when speculative decoding + thinking corrupt the reasoning→answer boundary (`` ```json{ ``, `{{`, `{"{`). The router locates the true document using the caller's own JSON Schema as an oracle and only commits when the output is syntactically impossible as a truncation; on any doubt it returns the backend's original bytes, byte-for-byte. See [Structured-output boundary repair](#structured-output-boundary-repair) below.
+- **Request-stats lifecycle fix**: In-flight counters no longer drift upward forever. `on_request_complete` sat outside a `finally`, so a client disconnect (`GeneratorExit`/`CancelledError` — both `BaseException`, so `except Exception` missed them) skipped the decrement and every abandoned request leaked its stage count for the life of the process; the per-request timestamp dicts were never popped even on success, growing without bound. `RequestStatsMonitor` now hands out an opaque per-attempt handle and exposes idempotent `on_request_complete` / `on_request_fail` / `on_request_abort`, retiring each attempt from the stage its own record says it is in. See [Request-stats lifecycle](#request-stats-lifecycle) below.
 
 Pre-built images are published to Docker Hub, tagged to match upstream releases:
 
@@ -91,6 +92,25 @@ Two routing changes affect chat-completion traffic even when structured-output r
 
 1. Semantic-cache lookup now uses the post-rewrite request body. It previously ran before routing against the pre-rewrite body. This is currently inert because only `NoopRequestRewriter` ships, but enabling a body-changing rewriter in the future will change cache keys for all chat-completion traffic, independently of the repair flag.
 2. `callbacks.pre_request(...)` now runs on semantic-cache hits. Cache hits were previously returned from `route_chat_completion` before reaching `route_general_request`, so callbacks did not run for cache-served responses. This means authentication, quota, and logging callbacks can now observe cache hits.
+
+### Request-stats lifecycle
+
+`RequestStatsMonitor` tracks in-flight requests as per-engine counters split by stage: `on_new_request` increments `in_prefill_requests`, the first response token moves the count to `in_decoding_requests`, and completion retires it. Upstream, the completion hook sits outside a `finally`, so any terminal path that is not a clean return skips it.
+
+The counters are per-engine aggregates rather than per-request, so adding a `finally` alone is not sufficient and is actively harmful: retiring a request that never reached decoding decrements `in_decoding_requests` anyway, stealing the decrement owed to a *different* concurrent request while the aborted request's prefill count leaks regardless. Upstream's multipart path demonstrates this — it already has the `finally` and still corrupts counters.
+
+The monitor now issues an opaque handle per backend attempt. The external `X-Request-Id` is caller-controlled and two concurrent requests may share one, so it is retained as metadata only and never used as identity. Each attempt has one authoritative active record naming the stage it is in; the finalizer pops that record first and retires the attempt from its recorded stage, which makes repeated or unknown finalization a no-op. All state and snapshots are guarded by a `threading.RLock`, because `--log-stats` runs a real OS thread that reads the same sliding-window buffers the event loop mutates.
+
+Terminal outcomes are explicit: `on_request_complete` for normal backend exhaustion, `on_request_fail` for a backend or transport error, and `on_request_abort` for client disconnect or cancellation.
+
+Behavior changes worth noting:
+
+- `finished_requests` now counts normal exhaustion only. Aborted and failed attempts no longer increment it. A response whose body is read to completion counts as exhaustion even when its status is 4xx or 5xx.
+- Abandoned streams are recorded as `status="aborted"` in `vllm:request_latency_seconds`. They were previously recorded as `success`, because the status defaulted to success and cancellation bypassed the error handler.
+- A request body that is not JSON-parsable now returns 400. It previously raised `TypeError` and surfaced as a 500, because `HTTPException(status=...)` is an invalid keyword — the parameter is `status_code`.
+- Failed failover attempts now retire. Each attempt owns its own handle and finalizes in its own `finally`, so an attempt that fails against one engine no longer leaves a count behind on it.
+
+Note that `vllm:num_requests_running` is exported by the router under the same metric name vLLM engines export natively. Dashboards and autoscaler queries should filter by `job` or component to avoid selecting the router-derived series. The stock autoscalers are unaffected: the router HPA scales on CPU, and the engine KEDA trigger uses `vllm:num_requests_waiting` from the engine scraper.
 
 ---
 
