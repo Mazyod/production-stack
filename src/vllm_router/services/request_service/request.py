@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 import os
 import time
@@ -272,10 +273,6 @@ async def process_request(
 
     first_token = False
     total_len = 0
-    start_time = time.time()
-    request.app.state.request_stats_monitor.on_new_request(
-        backend_url, request_id, start_time
-    )
     # Check if this is a streaming request and extract model name
     try:
         request_json = json.loads(body)
@@ -283,7 +280,14 @@ async def process_request(
         model_name = request_json.get("model", "unknown")
     except (JSONDecodeError, UnicodeDecodeError, ValueError):
         # If we can't parse the body as JSON, assume it's not streaming
-        raise HTTPException(status=400, detail="Request body is not JSON parsable.")
+        raise HTTPException(
+            status_code=400, detail="Request body is not JSON parsable."
+        )
+
+    start_time = time.time()
+    request_handle = request.app.state.request_stats_monitor.on_new_request(
+        backend_url, request_id, start_time
+    )
 
     # Add streaming info to span after parsing
     if span is not None:
@@ -298,8 +302,10 @@ async def process_request(
 
     # For non-streaming requests, collect the full response to cache it properly
     full_response = bytearray()
+    last_chunk = b""
 
-    request_status = "success"
+    request_status = "aborted"
+    terminal_outcome = "abort"
     http_status_code = None
 
     try:
@@ -319,22 +325,20 @@ async def process_request(
             yield backend_response.headers, backend_response.status
             # Stream response content.
             async for chunk in backend_response.content.iter_any():
+                last_chunk = chunk
                 total_len += len(chunk)
                 if not first_token:
                     first_token = True
                     request.app.state.request_stats_monitor.on_request_response(
-                        backend_url, request_id, time.time()
+                        request_handle, time.time()
                     )
                 # For non-streaming requests, collect the full response
                 if full_response is not None:
                     full_response.extend(chunk)
                 yield chunk
 
-        end_time = time.time()
-        request.app.state.request_stats_monitor.on_request_complete(
-            backend_url, request_id, end_time
-        )
-
+        terminal_outcome = "complete"
+        request_status = "success"
         if http_status_code is not None and http_status_code >= 400:
             request_status = "error"
 
@@ -357,7 +361,7 @@ async def process_request(
         # Store in semantic cache if applicable
         # Use the full response for non-streaming requests, or the last chunk for streaming
         if request.app.state.semantic_cache_available:
-            cache_chunk = bytes(full_response) if not is_streaming else chunk
+            cache_chunk = bytes(full_response) if not is_streaming else last_chunk
             await store_in_semantic_cache(
                 endpoint=endpoint, method=request.method, body=body, chunk=cache_chunk
             )
@@ -365,8 +369,13 @@ async def process_request(
             background_tasks.add_task(
                 request.app.state.callbacks.post_request, request, full_response
             )
+    except (GeneratorExit, asyncio.CancelledError):
+        request_status = "aborted"
+        terminal_outcome = "abort"
+        raise
     except Exception as e:
         request_status = "error"
+        terminal_outcome = "fail"
         # Track other errors
         request_errors_total.labels(
             server=backend_url, model=model_name, error_type=type(e).__name__
@@ -374,6 +383,11 @@ async def process_request(
         end_span(span, error=e) if tracing_active else None
         raise
     finally:
+        terminal_hook = getattr(
+            request.app.state.request_stats_monitor,
+            f"on_request_{terminal_outcome}",
+        )
+        terminal_hook(request_handle, time.time())
         request_latency_seconds.labels(
             server=backend_url, model=model_name, status=request_status
         ).observe(time.time() - start_time)
@@ -1259,7 +1273,9 @@ async def proxy_multipart_request(
             include_content_type=isinstance(form_data, bytes),
         )
 
-        request_stats_monitor.on_new_request(chosen_url, request_id, time.time())
+        request_handle = request_stats_monitor.on_new_request(
+            chosen_url, request_id, time.time()
+        )
 
         try:
             backend_response = await client.post(
@@ -1268,53 +1284,75 @@ async def proxy_multipart_request(
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=300),
             )
+        except (GeneratorExit, asyncio.CancelledError):
+            request_stats_monitor.on_request_abort(request_handle, time.time())
+            raise
         except Exception:
-            request_stats_monitor.on_request_complete(
-                chosen_url, request_id, time.time()
-            )
+            request_stats_monitor.on_request_fail(request_handle, time.time())
             raise
 
-        resp_headers = {
-            k: v
-            for k, v in backend_response.headers.items()
-            if k.lower() not in _HEADERS_TO_STRIP_FROM_RESPONSE
-        }
-        resp_headers["X-Request-Id"] = request_id
-
-        if stream:
-
-            async def traced_stream():
-                first_token = False
-                try:
-                    async for chunk in backend_response.content.iter_any():
-                        if not first_token:
-                            first_token = True
-                            request_stats_monitor.on_request_response(
-                                chosen_url, request_id, time.time()
-                            )
-                        if chunk:
-                            yield chunk
-                finally:
-                    backend_response.close()
-                    request_stats_monitor.on_request_complete(
-                        chosen_url, request_id, time.time()
-                    )
-
-            return StreamingResponse(
-                traced_stream(),
-                status_code=backend_response.status,
-                headers=resp_headers,
-                media_type=backend_response.headers.get(
-                    "content-type", "text/event-stream"
-                ),
-            )
-
         try:
-            request_stats_monitor.on_request_response(
-                chosen_url, request_id, time.time()
-            )
+            resp_headers = {
+                k: v
+                for k, v in backend_response.headers.items()
+                if k.lower() not in _HEADERS_TO_STRIP_FROM_RESPONSE
+            }
+            resp_headers["X-Request-Id"] = request_id
+
+            if stream:
+
+                async def traced_stream():
+                    first_token = False
+                    outcome = "abort"
+                    try:
+                        async for chunk in backend_response.content.iter_any():
+                            if chunk and not first_token:
+                                first_token = True
+                                request_stats_monitor.on_request_response(
+                                    request_handle, time.time()
+                                )
+                            if chunk:
+                                yield chunk
+                        outcome = "complete"
+                    except (GeneratorExit, asyncio.CancelledError):
+                        outcome = "abort"
+                        raise
+                    except Exception:
+                        outcome = "fail"
+                        raise
+                    finally:
+                        backend_response.close()
+                        terminal_hook = getattr(
+                            request_stats_monitor, f"on_request_{outcome}"
+                        )
+                        terminal_hook(request_handle, time.time())
+
+                return StreamingResponse(
+                    traced_stream(),
+                    status_code=backend_response.status,
+                    headers=resp_headers,
+                    media_type=backend_response.headers.get(
+                        "content-type", "text/event-stream"
+                    ),
+                )
+        except (GeneratorExit, asyncio.CancelledError):
+            try:
+                backend_response.close()
+            finally:
+                request_stats_monitor.on_request_abort(request_handle, time.time())
+            raise
+        except Exception:
+            try:
+                backend_response.close()
+            finally:
+                request_stats_monitor.on_request_fail(request_handle, time.time())
+            raise
+
+        outcome = "abort"
+        try:
+            request_stats_monitor.on_request_response(request_handle, time.time())
             response_content = await backend_response.json()
-            return JSONResponse(
+            response = JSONResponse(
                 content=response_content,
                 status_code=backend_response.status,
                 headers=resp_headers,
@@ -1324,6 +1362,7 @@ async def proxy_multipart_request(
                 text_content = await backend_response.text()
             except aiohttp.ClientError:
                 text_content = str(parse_error)
+            outcome = "complete"
             return JSONResponse(
                 status_code=502,
                 content={
@@ -1331,11 +1370,21 @@ async def proxy_multipart_request(
                 },
                 headers=resp_headers,
             )
+        except (GeneratorExit, asyncio.CancelledError):
+            outcome = "abort"
+            raise
+        except Exception:
+            outcome = "fail"
+            raise
+        else:
+            outcome = "complete"
+            return response
         finally:
-            backend_response.close()
-            request_stats_monitor.on_request_complete(
-                chosen_url, request_id, time.time()
-            )
+            try:
+                backend_response.close()
+            finally:
+                terminal_hook = getattr(request_stats_monitor, f"on_request_{outcome}")
+                terminal_hook(request_handle, time.time())
     except aiohttp.ClientResponseError as response_error:
         if response_error.response is not None:
             try:

@@ -1,5 +1,5 @@
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -8,6 +8,10 @@ from vllm_router.routers.routing_logic import (
     RoutingLogic,
     initialize_routing_logic,
 )
+from vllm_router.stats.request_stats import (
+    RequestStatsMonitor,
+)
+from vllm_router.stats.request_stats import SingletonMeta as RequestStatsSingletonMeta
 from vllm_router.utils import SingletonABCMeta
 
 
@@ -21,7 +25,9 @@ class EndpointInfo:
 
 @pytest.fixture(autouse=True)
 def cleanup_singletons():
+    RequestStatsSingletonMeta._instances.pop(RequestStatsMonitor, None)
     yield
+    RequestStatsSingletonMeta._instances.pop(RequestStatsMonitor, None)
     for cls in list(SingletonABCMeta._instances.keys()):
         del SingletonABCMeta._instances[cls]
 
@@ -46,7 +52,7 @@ def setup():
     state = MagicMock()
     state.router = router
     state.engine_stats_scraper.get_engine_stats.return_value = {}
-    state.request_stats_monitor.get_request_stats.return_value = {}
+    state.request_stats_monitor = RequestStatsMonitor(60.0)
     state.otel_enabled = False
     state.semantic_cache_available = False
     state.callbacks = None
@@ -138,6 +144,55 @@ async def test_retries_on_failure_with_different_url(setup):
     assert resp.status_code == 200
     assert len(urls_called) == 2
     assert urls_called[0] != urls_called[1]
+
+
+@pytest.mark.asyncio
+async def test_real_process_request_retires_failed_and_successful_attempts(setup):
+    req, _ = setup
+
+    async def iter_any():
+        yield b'{"usage": {}}'
+
+    response = MagicMock()
+    response.status = 200
+    response.headers = {"content-type": "application/json"}
+    response.content.iter_any = iter_any
+
+    def backend_request(*, url, **kwargs):
+        context = MagicMock()
+        if url.startswith("http://engine1"):
+            context.__aenter__ = AsyncMock(
+                side_effect=ConnectionError("first engine failed")
+            )
+        else:
+            context.__aenter__ = AsyncMock(return_value=response)
+        context.__aexit__ = AsyncMock(return_value=False)
+        return context
+
+    client = MagicMock()
+    client.request.side_effect = backend_request
+    req.app.state.aiohttp_client_wrapper = MagicMock(return_value=client)
+
+    from vllm_router.services.request_service.request import route_general_request
+
+    routed_response = await route_general_request(
+        req, "/v1/chat/completions", MagicMock()
+    )
+    assert [chunk async for chunk in routed_response.body_iterator] == [
+        b'{"usage": {}}'
+    ]
+
+    monitor = req.app.state.request_stats_monitor
+    stats = monitor.get_request_stats(10.0)
+    assert set(stats) == {"http://engine1", "http://engine2"}
+    assert stats["http://engine1"].in_prefill_requests == 0
+    assert stats["http://engine1"].in_decoding_requests == 0
+    assert stats["http://engine1"].finished_requests == 0
+    assert stats["http://engine2"].in_prefill_requests == 0
+    assert stats["http://engine2"].in_decoding_requests == 0
+    assert stats["http://engine2"].finished_requests == 1
+    assert monitor.request_start_time == {}
+    assert monitor.first_token_time == {}
 
 
 @pytest.mark.asyncio
