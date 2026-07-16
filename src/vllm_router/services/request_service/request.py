@@ -27,6 +27,10 @@ from fastapi import BackgroundTasks, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from requests import JSONDecodeError
 
+from vllm_router.aiohttp_client import (
+    DEFAULT_BACKEND_CLIENT_TIMEOUT,
+    backend_entry_deadline,
+)
 from vllm_router.log import init_logger
 from vllm_router.routers.routing_logic import (
     DisaggregatedPrefillOrchestratedRouter,
@@ -377,34 +381,46 @@ async def process_request(
     terminal_outcome = "abort"
     http_status_code = None
 
+    client_timeout = (
+        getattr(request.app.state, "backend_client_timeout", None)
+        or DEFAULT_BACKEND_CLIENT_TIMEOUT
+    )
+    entry_timeout = None
     try:
-        async with request.app.state.aiohttp_client_wrapper().request(
-            method=request.method,
-            url=backend_url + endpoint,
-            headers=headers,
-            data=body,
-            timeout=aiohttp.ClientTimeout(total=None),
-        ) as backend_response:
-            http_status_code = backend_response.status
-            # Set response status on span if tracing
-            if span is not None:
-                span.set_attribute("http.status_code", backend_response.status)
+        # sock_read does not arm until the request body is fully written, so
+        # the entry deadline bounds connect + body upload + header wait; it is
+        # disarmed once headers arrive and sock_read takes over.
+        async with asyncio.timeout(
+            backend_entry_deadline(client_timeout)
+        ) as entry_timeout:
+            async with request.app.state.aiohttp_client_wrapper().request(
+                method=request.method,
+                url=backend_url + endpoint,
+                headers=headers,
+                data=body,
+                timeout=client_timeout,
+            ) as backend_response:
+                entry_timeout.reschedule(None)
+                http_status_code = backend_response.status
+                # Set response status on span if tracing
+                if span is not None:
+                    span.set_attribute("http.status_code", backend_response.status)
 
-            # Yield headers and status code first.
-            yield backend_response.headers, backend_response.status
-            # Stream response content.
-            async for chunk in backend_response.content.iter_any():
-                last_chunk = chunk
-                total_len += len(chunk)
-                if not first_token:
-                    first_token = True
-                    request.app.state.request_stats_monitor.on_request_response(
-                        request_handle, time.time()
-                    )
-                # For non-streaming requests, collect the full response
-                if full_response is not None:
-                    full_response.extend(chunk)
-                yield chunk
+                # Yield headers and status code first.
+                yield backend_response.headers, backend_response.status
+                # Stream response content.
+                async for chunk in backend_response.content.iter_any():
+                    last_chunk = chunk
+                    total_len += len(chunk)
+                    if not first_token:
+                        first_token = True
+                        request.app.state.request_stats_monitor.on_request_response(
+                            request_handle, time.time()
+                        )
+                    # For non-streaming requests, collect the full response
+                    if full_response is not None:
+                        full_response.extend(chunk)
+                    yield chunk
 
         terminal_outcome = "complete"
         request_status = "success"
@@ -438,7 +454,20 @@ async def process_request(
             background_tasks.add_task(
                 request.app.state.callbacks.post_request, request, full_response
             )
-    except (GeneratorExit, asyncio.CancelledError):
+    except (GeneratorExit, asyncio.CancelledError) as e:
+        if entry_timeout is not None and entry_timeout.expired():
+            # Normally the deadline's CancelledError becomes TimeoutError at
+            # asyncio.timeout's __aexit__ and lands in `except Exception`
+            # below. This branch covers the race where expiry coincides with
+            # another cancellation: an expired timer is a backend failure,
+            # never a client abort.
+            request_status = "error"
+            terminal_outcome = "fail"
+            request_errors_total.labels(
+                server=backend_url, model=model_name, error_type="TimeoutError"
+            ).inc()
+            end_span(span, error=e) if tracing_active else None
+            raise
         request_status = "aborted"
         terminal_outcome = "abort"
         raise

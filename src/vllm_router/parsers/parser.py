@@ -16,6 +16,10 @@ import json
 import sys
 
 from vllm_router import utils
+from vllm_router.aiohttp_client import (
+    DEFAULT_BACKEND_CONNECT_TIMEOUT,
+    DEFAULT_BACKEND_READ_TIMEOUT,
+)
 from vllm_router.log import init_logger
 from vllm_router.parsers.yaml_utils import (
     read_and_process_yaml_config_file,
@@ -148,6 +152,31 @@ def parse_args():
         "router has already closed, which surfaces as a slow/failed first "
         "request after a few seconds of idle. Default is 5 (uvicorn's "
         "default); set 0 to disable the timeout.",
+    )
+    parser.add_argument(
+        "--backend-connect-timeout",
+        type=float,
+        default=DEFAULT_BACKEND_CONNECT_TIMEOUT,
+        help="Seconds allowed to establish a new connection to a backend "
+        "(DNS resolution included) before the attempt fails; the failover "
+        "loop then tries the next engine. Without it, a black-holed backend "
+        "(dead node, dropped SYNs) hangs the request forever and failover "
+        "never runs. Applies only to new connections, not pooled ones. Set 0 "
+        f"to disable. Default is {DEFAULT_BACKEND_CONNECT_TIMEOUT:g}.",
+    )
+    parser.add_argument(
+        "--backend-read-timeout",
+        type=float,
+        default=DEFAULT_BACKEND_READ_TIMEOUT,
+        help="Max seconds of backend silence — no bytes received, including "
+        "the wait for response headers and the request-body upload — before "
+        "the request fails. The timer re-arms on every byte, so a stream "
+        "that keeps producing is never affected and total duration stays "
+        "unbounded; but a non-streaming generation or a queued request that "
+        "stays silent longer than this is terminated (and retried on "
+        "another engine when it fails before response headers arrive). "
+        "Raise it or set 0 to disable if requests legitimately stay silent "
+        f"longer. Default is {DEFAULT_BACKEND_READ_TIMEOUT:g}.",
     )
     parser.add_argument(
         "--service-discovery",

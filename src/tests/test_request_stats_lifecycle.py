@@ -8,7 +8,6 @@ from vllm_router.stats.request_stats import (
     SingletonMeta,
 )
 
-
 ENGINE = "http://engine"
 
 
