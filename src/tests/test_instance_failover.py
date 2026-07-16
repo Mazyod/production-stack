@@ -196,6 +196,55 @@ async def test_real_process_request_retires_failed_and_successful_attempts(setup
 
 
 @pytest.mark.asyncio
+async def test_backend_timeout_errors_fail_over_to_next_engine(setup):
+    """The socket timeouts surface as plain Exceptions before the first yield,
+    so a black-holed engine now reaches the failover loop instead of hanging
+    the request forever."""
+    import aiohttp
+
+    req, _ = setup
+
+    async def iter_any():
+        yield b'{"usage": {}}'
+
+    response = MagicMock()
+    response.status = 200
+    response.headers = {"content-type": "application/json"}
+    response.content.iter_any = iter_any
+
+    def backend_request(*, url, **kwargs):
+        context = MagicMock()
+        if url.startswith("http://engine1"):
+            context.__aenter__ = AsyncMock(
+                side_effect=aiohttp.ConnectionTimeoutError("sock_connect exceeded")
+            )
+        else:
+            context.__aenter__ = AsyncMock(return_value=response)
+        context.__aexit__ = AsyncMock(return_value=False)
+        return context
+
+    client = MagicMock()
+    client.request.side_effect = backend_request
+    req.app.state.aiohttp_client_wrapper = MagicMock(return_value=client)
+
+    from vllm_router.services.request_service.request import route_general_request
+
+    routed_response = await route_general_request(
+        req, "/v1/chat/completions", MagicMock()
+    )
+    assert routed_response.status_code == 200
+    assert [chunk async for chunk in routed_response.body_iterator] == [
+        b'{"usage": {}}'
+    ]
+
+    monitor = req.app.state.request_stats_monitor
+    stats = monitor.get_request_stats(10.0)
+    assert stats["http://engine1"].in_prefill_requests == 0
+    assert stats["http://engine1"].finished_requests == 0
+    assert stats["http://engine2"].finished_requests == 1
+
+
+@pytest.mark.asyncio
 async def test_raises_after_all_attempts_exhausted(setup):
     req, router = setup
 
