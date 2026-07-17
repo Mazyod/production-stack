@@ -208,3 +208,26 @@ def test_from_args_matches_from_yaml_for_unchanged_file(monkeypatch):
         os.unlink(path)
 
     assert from_args == from_yaml
+
+
+def test_timeout_keep_alive_is_loaded_from_yaml_at_startup(monkeypatch):
+    # timeout_keep_alive is a fork-introduced flag consumed at startup: app.py
+    # hands args.timeout_keep_alive to uvicorn. Setting it only in the
+    # --dynamic-config-yaml file (no CLI flag) must flow through parse_args'
+    # set_defaults into args, so the value uvicorn receives is the YAML value.
+    document = {
+        "service_discovery": "static",
+        "routing_logic": "roundrobin",
+        "static_models": {"m1": {"static_backends": ["http://vllm-worker:8000"]}},
+        "timeout_keep_alive": 120,
+    }
+    fd, path = tempfile.mkstemp(suffix=".yaml")
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(document, f)
+        monkeypatch.setattr(sys, "argv", [sys.argv[0], "--dynamic-config-yaml", path])
+        args = parser.parse_args()
+    finally:
+        os.unlink(path)
+
+    assert args.timeout_keep_alive == 120
