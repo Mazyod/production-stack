@@ -159,10 +159,12 @@ def parse_args():
         default=DEFAULT_BACKEND_CONNECT_TIMEOUT,
         help="Seconds allowed to establish a new connection to a backend "
         "(DNS resolution included) before the attempt fails; the failover "
-        "loop then tries the next engine. Without it, a black-holed backend "
-        "(dead node, dropped SYNs) hangs the request forever and failover "
-        "never runs. Applies only to new connections, not pooled ones. Set 0 "
-        f"to disable. Default is {DEFAULT_BACKEND_CONNECT_TIMEOUT:g}.",
+        "loop then tries the next engine, and exhausting every engine "
+        "returns a structured 502 (code backend_connect_error). Without it, "
+        "a black-holed backend (dead node, dropped SYNs) hangs the request "
+        "forever and failover never runs. Applies only to new connections, "
+        "not pooled ones. Set 0 to disable. Default is "
+        f"{DEFAULT_BACKEND_CONNECT_TIMEOUT:g}.",
     )
     parser.add_argument(
         "--backend-read-timeout",
@@ -173,10 +175,13 @@ def parse_args():
         "the request fails. The timer re-arms on every byte, so a stream "
         "that keeps producing is never affected and total duration stays "
         "unbounded; but a non-streaming generation or a queued request that "
-        "stays silent longer than this is terminated (and retried on "
-        "another engine when it fails before response headers arrive). "
-        "Raise it or set 0 to disable if requests legitimately stay silent "
-        f"longer. Default is {DEFAULT_BACKEND_READ_TIMEOUT:g}.",
+        "stays silent longer than this is terminated with a structured 504 "
+        "(code backend_read_timeout / backend_entry_timeout) without "
+        "rotating backends — the stall is workload-shaped, so a retry "
+        "would eat the same bound again. Mid-stream SSE stalls end with an "
+        "in-band error event plus data: [DONE]. Raise it or set 0 to "
+        "disable if requests legitimately stay silent longer. Default is "
+        f"{DEFAULT_BACKEND_READ_TIMEOUT:g}.",
     )
     parser.add_argument(
         "--service-discovery",

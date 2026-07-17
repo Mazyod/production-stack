@@ -502,6 +502,39 @@ async def test_non_streaming_repairs_and_sets_content_length(setup_engaged):
 
 
 @pytest.mark.asyncio
+async def test_engaged_non_streaming_read_timeout_returns_structured_504(setup_engaged):
+    """With repair engaged, the buffered collection consumes the backend before
+    any client commitment: a read timeout there must surface as the structured
+    504, not as a 200 whose body aborts. Regression: SocketTimeoutError
+    subclasses TimeoutError, so it must not be mistaken for the repair
+    deadline (asyncio.TimeoutError) either."""
+    import aiohttp
+
+    req, _ = setup_engaged
+
+    async def backend(*a, **kw):
+        yield {"content-type": "application/json"}, 200
+        yield b'{"partial": '
+        raise aiohttp.SocketTimeoutError("read gap mid-collection")
+
+    with patch(
+        "vllm_router.services.request_service.request.process_request",
+        side_effect=backend,
+    ):
+        from vllm_router.services.request_service.request import route_general_request
+
+        resp = await route_general_request(req, "/v1/chat/completions", MagicMock())
+
+    assert resp.status_code == 504
+    error = json.loads(resp.body)["error"]
+    assert error["type"] == "gateway_timeout"
+    assert error["code"] == "backend_read_timeout"
+    assert error["param"] is None
+    assert "x-request-id" in resp.headers
+    assert resp.headers["retry-after"] == "1"
+
+
+@pytest.mark.asyncio
 async def test_initialize_all_flag_engages_end_to_end_response_repair():
     import vllm_router.app as app_module
 

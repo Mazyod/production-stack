@@ -66,7 +66,9 @@ def test_build_backend_client_timeout_negative_disables():
 
 def test_default_backend_client_timeout_matches_flag_defaults():
     assert DEFAULT_BACKEND_CLIENT_TIMEOUT.total is None
-    assert DEFAULT_BACKEND_CLIENT_TIMEOUT.sock_connect == DEFAULT_BACKEND_CONNECT_TIMEOUT
+    assert (
+        DEFAULT_BACKEND_CLIENT_TIMEOUT.sock_connect == DEFAULT_BACKEND_CONNECT_TIMEOUT
+    )
     assert DEFAULT_BACKEND_CLIENT_TIMEOUT.sock_read == DEFAULT_BACKEND_READ_TIMEOUT
 
 
