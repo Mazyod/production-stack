@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 
+import pytest
 import yaml
 
 from vllm_router.dynamic_config import DynamicRouterConfig
@@ -47,8 +48,8 @@ def test_from_args_carries_timeout_keep_alive(monkeypatch):
 
 
 def test_from_yaml_accepts_timeout_keep_alive_without_crashing():
-    # Regression: a config file carrying timeout_keep_alive must not make the
-    # watcher's strict DynamicRouterConfig(**config) reject the unknown key.
+    # timeout_keep_alive is a reconfigurable dataclass field, so a config file
+    # carrying it must load and apply it (it is honored at startup for uvicorn).
     fd, path = tempfile.mkstemp(suffix=".yaml")
     try:
         with os.fdopen(fd, "w") as f:
@@ -136,3 +137,67 @@ def test_fork_flags_are_inert_to_the_watcher():
             os.unlink(path)
 
     assert cfgs[0] == cfgs[1]
+
+
+def test_unrecognized_key_is_rejected_to_protect_running_config():
+    # A key that is neither a reconfigurable field nor a recognized startup-only
+    # flag is almost certainly a typo (here, `callback` for the hot-reloadable
+    # `callbacks`). Tolerating it would drop it and silently revert `callbacks`
+    # to its default on the next watcher tick, disabling callbacks. Instead the
+    # load must raise, so the watcher keeps the running configuration.
+    document = {
+        "service_discovery": "static",
+        "routing_logic": "roundrobin",
+        "callback": "pkg.module.handler",
+    }
+    fd, path = tempfile.mkstemp(suffix=".yaml")
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(document, f)
+        with pytest.raises(ValueError):
+            DynamicRouterConfig.from_yaml(path)
+    finally:
+        os.unlink(path)
+
+
+def test_recognized_startup_only_key_is_tolerated_not_rejected():
+    # backend_read_timeout is a real flag (startup-only, not a reconfigurable
+    # field); a config that carries it must load rather than be rejected as a
+    # typo — it is honored at startup and ignored by the watcher.
+    document = {
+        "service_discovery": "static",
+        "routing_logic": "roundrobin",
+        "backend_read_timeout": 600.0,
+    }
+    fd, path = tempfile.mkstemp(suffix=".yaml")
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(document, f)
+        cfg = DynamicRouterConfig.from_yaml(path)
+    finally:
+        os.unlink(path)
+    assert cfg.service_discovery == "static"
+
+
+def test_from_args_matches_from_yaml_for_unchanged_file(monkeypatch):
+    # The startup baseline (from_args) must equal what the watcher's first tick
+    # reads (from_yaml) for the same, unchanged file, so the first tick is a
+    # genuine no-op and cannot fire a spurious reconfigure that races startup.
+    document = {
+        "service_discovery": "static",
+        "routing_logic": "roundrobin",
+        "static_models": {"m1": {"static_backends": ["http://vllm-worker:8000"]}},
+        **FORK_STARTUP_ONLY_FLAGS,
+    }
+    fd, path = tempfile.mkstemp(suffix=".yaml")
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(document, f)
+        monkeypatch.setattr(sys, "argv", [sys.argv[0], "--dynamic-config-yaml", path])
+        args = parser.parse_args()
+        from_args = DynamicRouterConfig.from_args(args)
+        from_yaml = DynamicRouterConfig.from_yaml(path)
+    finally:
+        os.unlink(path)
+
+    assert from_args == from_yaml
