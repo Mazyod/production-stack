@@ -15,8 +15,8 @@
 import json
 import threading
 import time
-from dataclasses import dataclass
-from typing import Literal, Optional
+from dataclasses import dataclass, fields
+from typing import Any, Literal, Optional
 
 from fastapi import FastAPI
 
@@ -114,16 +114,39 @@ class DynamicRouterConfig:
             timeout_keep_alive=args.timeout_keep_alive,
         )
 
+    @classmethod
+    def _from_config_dict(cls, config: dict[str, Any]) -> "DynamicRouterConfig":
+        """Build a config from a raw file dict, tolerating extra keys.
+
+        The dynamic-config file is a single source of truth an operator may
+        also use to set startup-only flags (the backend socket timeouts,
+        etc.). Those are honored at startup via
+        ``parser.set_defaults`` but are not reconfigurable fields, so the
+        watcher must accept and ignore them instead of raising ``TypeError``
+        on the strict ``cls(**config)`` construction. Keys that are not
+        dataclass fields are dropped (and logged at debug); the remaining
+        reconfigurable fields are applied as before.
+        """
+        known = {f.name for f in fields(cls)}
+        dropped = sorted(key for key in config if key not in known)
+        if dropped:
+            logger.debug(
+                "DynamicConfigWatcher: ignoring non-reconfigurable config keys "
+                "(honored at startup, not hot-reloaded): %s",
+                ", ".join(dropped),
+            )
+        return cls(**{key: value for key, value in config.items() if key in known})
+
     @staticmethod
     def from_yaml(yaml_path: str) -> "DynamicRouterConfig":
         config = read_and_process_yaml_config_file(yaml_path)
-        return DynamicRouterConfig(**config)
+        return DynamicRouterConfig._from_config_dict(config)
 
     @staticmethod
     def from_json(json_path: str) -> "DynamicRouterConfig":
         with open(json_path, "r") as f:
             config = json.load(f)
-        return DynamicRouterConfig(**config)
+        return DynamicRouterConfig._from_config_dict(config)
 
     def to_json_str(self) -> str:
         return json.dumps(self, default=lambda o: o.__dict__, sort_keys=True, indent=4)

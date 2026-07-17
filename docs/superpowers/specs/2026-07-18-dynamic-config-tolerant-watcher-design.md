@@ -54,14 +54,16 @@ def _from_config_dict(cls, config: dict) -> "DynamicRouterConfig":
 - **vs. enumerating the fork flags as `DynamicRouterConfig` fields** (the literal `timeout_keep_alive` precedent): tolerance covers *all* flags with zero per-flag maintenance, now and for any future flag. It is also strictly safer on the spurious-reconfigure axis (below).
 - **vs. a new static `--config` flag that skips the watcher:** larger change, and it forces operators to change their launch command. Not needed given tolerance keeps the existing command working.
 
-### No spurious reconfigure — the key property
+### Fork flags are inert to the watcher — the key property
 
-The watcher decides to reconfigure with `if config != self.current_config`. `current_config` is built at startup from `DynamicRouterConfig.from_args(args)`, which only ever contains dataclass fields. Because the dropped fork flags never enter the dataclass, `from_args(args)` and `from_yaml(path)` agree on every field for the same file. Therefore:
+The watcher decides to reconfigure with `if config != self.current_config`, where both operands are `DynamicRouterConfig` instances. Because the fork flags are dropped by the filter, they never enter the dataclass on **either** side of that comparison — neither `from_args(args)` (which only reads dataclass fields) nor `from_yaml(path)` (which now filters). Therefore:
 
-- The first watch tick does **not** fire a spurious `reconfigure_all`.
-- Editing a startup-only key at runtime does **not** perturb the comparison at all — no pointless teardown/rebuild of service discovery + routing. (The edited value still needs a restart to take effect.)
+- **Editing a startup-only fork key at runtime does not fire a reconfigure.** Both `current_config` (set from a prior `from_yaml`) and the new tick's `config` filter the key out identically, so the comparison is unchanged. (The edited value still needs a restart to take effect.)
+- Adding fork flags to the file is **neutral** with respect to the first-tick comparison: they contribute nothing to it.
 
 This is a concrete improvement over the enumerate-9-fields approach, where each fork flag *would* be a dataclass field and editing one at runtime *would* fire a disruptive, no-op `reconfigure_all`.
+
+**Honest limit:** this change does **not** claim `from_args(args) == from_yaml(path)` in general. It is not true today: `from_args` copies argparse defaults for `k8s_port` (8000), `k8s_namespace` (`"default"`), and `k8s_label_selector` (`""`), while the dataclass defaults for those are `None`, so a YAML that omits them already differs from `current_config` on the first tick. That pre-existing first-tick reconfigure is orthogonal to this change (see §7); tolerance neither causes nor cures it.
 
 ## 4. Scope of change
 
@@ -79,7 +81,7 @@ Unit tests in `src/tests/test_dynamic_config.py`:
 
 1. `from_yaml` accepts all fork flags **plus** a sample upstream key (e.g. `engine_stats_interval`) in one file without crashing, and still parses the reconfigurable fields (`service_discovery`, `routing_logic`).
 2. `from_json` equivalent.
-3. **No spurious reconfigure:** with a YAML that carries fork flags, `parse_args(--dynamic-config-yaml=…)` then assert `DynamicRouterConfig.from_args(args) == DynamicRouterConfig.from_yaml(path)`.
+3. **Fork flags are inert:** two YAML files identical except that one carries all 9 fork flags produce **equal** `DynamicRouterConfig` objects via `from_yaml` — proving the fork flags cannot perturb the watcher's `config != current_config` comparison. (Deliberately not `from_args == from_yaml`; see §3 "Honest limit".)
 4. Existing `timeout_keep_alive` tests continue to pass (regression).
 
 **Real-environment verification** (project `verify` skill): boot the actual router with `--dynamic-config-yaml` carrying fork flags against a fake engine, and prove:
@@ -91,4 +93,9 @@ Unit tests in `src/tests/test_dynamic_config.py`:
 
 ## 7. Noted, out of scope
 
-`DynamicRouterConfig.from_args` omits `prefill_model_labels`, `decode_model_labels`, and `static_model_labels` (they exist on the dataclass but are not copied from `args`). If an operator sets one of these *hot-reloadable* keys in the YAML, `from_args` yields `None` while `from_yaml` yields the value, so the first watch tick fires a spurious `reconfigure_all`. This is a **pre-existing** bug, unrelated to the fork flags, and is left untouched here (flagged for a separate change and to Codex).
+Two **pre-existing** first-tick spurious-reconfigure triggers, both unrelated to the fork flags and left untouched here (flagged for a separate change and to Codex):
+
+1. **`from_args` argparse-vs-dataclass default mismatch.** `from_args` copies `args.k8s_port` (8000), `args.k8s_namespace` (`"default"`), and `args.k8s_label_selector` (`""`), but the dataclass defaults for those fields are `None`. Any dynamic-config file that omits these keys therefore produces a `from_yaml` config that differs from the startup `current_config`, firing one `reconfigure_all` on the first watch tick. This affects essentially every dynamic-config deployment today.
+2. **`from_args` omits label fields.** `prefill_model_labels`, `decode_model_labels`, and `static_model_labels` exist on the dataclass but are not copied from `args`. If an operator sets one of these *hot-reloadable* keys in the YAML, `from_args` yields `None` while `from_yaml` yields the value — another first-tick `reconfigure_all`.
+
+Neither is caused or cured by the tolerance change. A clean fix (align `from_args` with the dataclass, or vice versa) belongs in its own commit.
