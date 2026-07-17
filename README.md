@@ -13,6 +13,7 @@ This is a lightweight fork of [vllm-project/production-stack](https://github.com
 - **numpy unpinned**: `>=1.26.4` instead of `==1.26.4` (no Python 3.13 wheels for 1.26.4).
 - **Structured-output boundary repair**: `--enable-structured-output-repair` (off by default) repairs vLLM's grammar-constrained JSON when speculative decoding + thinking corrupt the reasoning→answer boundary (`` ```json{ ``, `{{`, `{"{`). The router locates the true document using the caller's own JSON Schema as an oracle and only commits when the output is syntactically impossible as a truncation; on any doubt it returns the backend's original bytes, byte-for-byte. See [Structured-output boundary repair](#structured-output-boundary-repair) below.
 - **Request-stats lifecycle fix**: In-flight counters no longer drift upward forever. `on_request_complete` sat outside a `finally`, so a client disconnect (`GeneratorExit`/`CancelledError` — both `BaseException`, so `except Exception` missed them) skipped the decrement and every abandoned request leaked its stage count for the life of the process; the per-request timestamp dicts were never popped even on success, growing without bound. `RequestStatsMonitor` now hands out an opaque per-attempt handle and exposes idempotent `on_request_complete` / `on_request_fail` / `on_request_abort`, retiring each attempt from the stage its own record says it is in. Backend sockets are bounded to match: `--backend-connect-timeout` (10 s) and `--backend-read-timeout` (300 s of silence, not of duration) stop a black-holed engine from hanging a request — and its counters — forever, and timeouts surface as structured **504/502** responses with an OpenAI-style error envelope (SSE streams get an in-band terminal error event) instead of bare 500s. See [Request-stats lifecycle](#request-stats-lifecycle) below.
+- **Dynamic-config file accepts all fork flags**: The `--dynamic-config-yaml` / `--dynamic-config-json` watcher used to reject any key that was not a hot-reloadable field, raising `TypeError` every 10 s and silently killing hot-reload of service discovery / routing. The fork's startup-only flags — the backend socket timeouts and every `structured-output-repair` knob — therefore could not live in the config file you already pass, even though they load fine at startup. The watcher now tolerates non-reconfigurable keys: they are honored at startup and ignored (debug-logged) on reload, so you can keep all configuration in one file. See [Loading fork flags from the dynamic config file](#loading-fork-flags-from-the-dynamic-config-file) below.
 
 Pre-built images are published to Docker Hub, tagged to match upstream releases:
 
@@ -127,6 +128,47 @@ Every error response carries `X-Request-Id` and `Retry-After: 1`. Each timeout l
 The one behavior change: a non-streaming generation — headers arrive only when generation finishes — or a deeply queued request whose backend stays silent longer than 300 s is now terminated with the 504 above rather than waiting indefinitely. Raise `--backend-read-timeout` (or set `0`) if your workloads legitimately stay silent longer; prefer streaming for very long generations.
 
 Note that `vllm:num_requests_running` is exported by the router under the same metric name vLLM engines export natively. Dashboards and autoscaler queries should filter by `job` or component to avoid selecting the router-derived series. The stock autoscalers are unaffected: the router HPA scales on CPU, and the engine KEDA trigger uses `vllm:num_requests_waiting` from the engine scraper.
+
+### Loading fork flags from the dynamic config file
+
+If you launch the router with `--dynamic-config-yaml` (or `--dynamic-config-json`), that file is your single source of truth: you do not also need to spell the fork's flags out in the `command:` array. Every flag the router accepts — including the fork's startup-only ones below — can be set as a key in that file.
+
+The startup-only fork flags and their config keys:
+
+| Config key | Flag | Default |
+|---|---|---|
+| `backend_connect_timeout` | `--backend-connect-timeout` | `10.0` |
+| `backend_read_timeout` | `--backend-read-timeout` | `300.0` |
+| `enable_structured_output_repair` | `--enable-structured-output-repair` | `false` |
+| `structured_output_repair_max_bytes` | `--structured-output-repair-max-bytes` | `1048576` |
+| `structured_output_repair_max_seconds` | `--structured-output-repair-max-seconds` | `30.0` |
+| `structured_output_repair_capture_dir` | `--structured-output-repair-capture-dir` | unset |
+| `structured_output_repair_capture_sample_rate` | `--structured-output-repair-capture-sample-rate` | `0.01` |
+| `structured_output_repair_capture_max_bytes` | `--structured-output-repair-capture-max-bytes` | `4096` |
+| `structured_output_repair_capture_retention_days` | `--structured-output-repair-capture-retention-days` | `7` |
+
+Example:
+
+```yaml
+service_discovery: static
+routing_logic: roundrobin
+static_models:
+  my-model:
+    static_backends:
+      - http://vllm-worker:8000
+
+# Fork flags — same file, no command-line flags needed:
+backend_connect_timeout: 10.0
+backend_read_timeout: 300.0
+enable_structured_output_repair: true
+structured_output_repair_max_bytes: 1048576
+```
+
+Three things to know:
+
+- **Keys use underscores, not dashes.** The config key is `backend_read_timeout`, matching the flag's destination — not `backend-read-timeout`. A dashed key matches no flag and is silently ignored.
+- **These flags are read once, at startup.** Editing them in the file while the router runs has no effect until you restart it. Only the hot-reloadable fields (`static_backends`, `routing_logic`, `callbacks`, …) take effect on a live edit; the watcher re-reads the file every 10 s but applies only that subset. The startup-only flags are inert to the watcher, so editing one is a no-op (logged at `debug`), not a reconfigure.
+- **A key that is not a recognized flag is rejected, and your running config is kept.** If the watcher re-reads the file and finds a key that is neither a hot-reloadable field nor a known flag — almost always a typo (e.g. `callback` instead of `callbacks`) — it logs a warning and does **not** reconfigure, so the running configuration is preserved rather than silently reverting the mistyped field to its default. Fix the typo and the next reload applies cleanly.
 
 ---
 
