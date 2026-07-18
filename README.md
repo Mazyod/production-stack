@@ -23,13 +23,13 @@ docker pull openimage/production-stack-router:v0.1.10
 
 ### Audio-enabled vLLM serving image
 
-The stock `vllm/vllm-openai` image ships **without** the audio extras, so `POST /v1/audio/transcriptions` fails at request time with `ImportError: Please install vllm[audio] for audio support` (surfaced to clients as a generic `400 Invalid or unsupported audio file`). This fork also publishes a drop-in replacement that installs the vLLM `audio` extra (`av`, `soundfile`, `soxr`, `scipy`, … — the set tracks the vLLM version), pinned to the exact vLLM build in the base image so nothing else changes:
+The stock `vllm/vllm-openai` image ships **without** the audio extras, so `POST /v1/audio/transcriptions` fails at request time with `ImportError: Please install vllm[audio] for audio support` (surfaced to clients as a generic `400 Invalid or unsupported audio file`). A drop-in replacement installs the vLLM `audio` extra (`av`, `soundfile`, `soxr`, `scipy`, … — the set tracks the vLLM version), pinned to the exact vLLM build in the base image so nothing else changes:
 
 ```console
-docker pull openimage/vllm-openai-audio:v0.10.0
+docker pull openimage/vllm-openai-audio:v0.25.1
 ```
 
-It tracks vLLM core releases (a separate cadence from the router), is built from `docker/Dockerfile.audio` by the [`build-vllm-audio`](.github/workflows/build-vllm-audio.yml) workflow, and keeps the upstream entrypoint — swap the image and Whisper/transcription endpoints just work.
+> **This image now lives in the vLLM engine fork, [`Mazyod/vllm`](https://github.com/Mazyod/vllm).** Everything about the vLLM **engine** was consolidated there; production-stack owns only the **router**. The fork layers the audio extra **and** a small series of upstream bugfix backports onto a pinned `vllm/vllm-openai` release — see its [`FORK.md`](https://github.com/Mazyod/vllm/blob/main/FORK.md). The image name, registry, and drop-in entrypoint are unchanged, so `openimage/vllm-openai-audio` stays the pull target and swapping the image keeps Whisper/transcription endpoints working.
 
 ### Structured-output boundary repair
 
