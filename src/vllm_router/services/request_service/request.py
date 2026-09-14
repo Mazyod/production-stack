@@ -101,6 +101,7 @@ _HEADERS_TO_STRIP_FROM_RESPONSE = {
     "content-encoding",
     "transfer-encoding",
     "connection",
+    "server",
 }
 
 # Connect-phase failures rotate to another backend; read/entry timeouts do
