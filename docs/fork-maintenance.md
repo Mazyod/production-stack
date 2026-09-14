@@ -12,6 +12,14 @@ append follow-up commits after publication. Prefer upstream behavior when a
 workaround is no longer needed. Commit bodies explain the reason and report
 actual verification, including failures or checks that were not run.
 
+Sync the checkout by merging the latest upstream release tag, preserving
+published history. The release replays only non-merge fork commits: upstream
+sync merges are excluded because the target tag already contains their changes.
+If a sync requires a fork-specific conflict fix, retain that fix as a separate
+replayable patch and verify the reconstructed release tree. Changes newer than
+the selected upstream tag need explicit backport patches; merging upstream main
+alone does not include them in the released image.
+
 The [image workflow](../.github/workflows/build-router.yml) does the following:
 
 1. Resolves an upstream `vllm-stack-*` tag, or uses a manually supplied tag.

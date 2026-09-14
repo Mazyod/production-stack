@@ -19,7 +19,7 @@ This is a lightweight fork of [vllm-project/production-stack](https://github.com
 Pre-built images are published to Docker Hub, tagged to match upstream releases:
 
 ```console
-docker pull openimage/production-stack-router:v0.1.10
+docker pull openimage/production-stack-router:v0.1.12
 ```
 
 The release workflow replays the fork patches onto an upstream release tag and runs the router regression suite before publishing versioned images. It requires HTTP 200 from the image's `/health` before promoting `latest`.

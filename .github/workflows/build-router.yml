@@ -133,9 +133,10 @@ jobs:
           git remote add upstream https://github.com/vllm-project/production-stack.git
           git fetch upstream --tags
 
-          # Collect our patch commits (everything on main after the upstream merge base)
+          # Replay fork patches, excluding upstream-sync merge commits. The
+          # selected upstream release tag already supplies the merged changes.
           MERGE_BASE=$(git merge-base HEAD upstream/main)
-          PATCH_COMMITS=$(git rev-list --reverse "${MERGE_BASE}..HEAD")
+          PATCH_COMMITS=$(git rev-list --reverse --no-merges "${MERGE_BASE}..HEAD")
           PATCH_COUNT=$(echo "$PATCH_COMMITS" | wc -l | tr -d ' ')
           echo "Found $PATCH_COUNT patch commit(s) to apply"
 
