@@ -204,9 +204,10 @@ async def test_connect_timeout_rotates_backends_then_returns_502(setup):
     response = await _route(req)
 
     assert response.status_code == 502
-    assert sorted(attempted) == ["http://engine1", "http://engine2"], (
-        "connect failures must rotate before surfacing"
-    )
+    assert sorted(attempted) == [
+        "http://engine1",
+        "http://engine2",
+    ], "connect failures must rotate before surfacing"
     assert json.loads(response.body) == CONNECT_ERROR_ENVELOPE
     _assert_contract_headers(response)
 

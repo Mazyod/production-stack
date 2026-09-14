@@ -92,9 +92,11 @@ jobs:
             fi
           fi
 
-          echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+          {
+            echo "upstream_tag=$UPSTREAM_TAG"
+            echo "version=$VERSION"
+            echo "should_build=$SHOULD_BUILD"
+          } >> "$GITHUB_OUTPUT"
 
           echo ""
           echo "========================================"
@@ -172,6 +174,13 @@ jobs:
 
           echo "Source ready: $UPSTREAM_TAG + $PATCH_COUNT patches"
 
+      - name: Test patched router before publication
+        run: |
+          python -m pip install uv
+          uv venv --python 3.13
+          uv pip install . --group test
+          .venv/bin/python -m pytest src/tests -q
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -197,13 +206,15 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### Build Complete" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Upstream tag:** \`${{ needs.check-upstream.outputs.upstream_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Tags:**" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - \`${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.upstream_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "  - \`${{ env.IMAGE_NAME }}:v${{ needs.check-upstream.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Build Complete"
+            echo ""
+            echo "- **Upstream tag:** \`${{ needs.check-upstream.outputs.upstream_tag }}\`"
+            echo "- **Tags:**"
+            echo "  - \`${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.upstream_tag }}\`"
+            echo "  - \`${{ env.IMAGE_NAME }}:v${{ needs.check-upstream.outputs.version }}\`"
+            echo "- **Digest:** \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
   # Job 3: Smoke test the built image
@@ -256,14 +267,14 @@ jobs:
         run: |
           MAX_RETRIES=10
           for i in $(seq 1 $MAX_RETRIES); do
-            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/health || true)
+            HTTP_CODE=$(curl -s --max-time 5 -o /dev/null -w "%{http_code}" http://localhost:8080/health || true)
             echo "Attempt $i/$MAX_RETRIES: HTTP $HTTP_CODE"
-            if [[ "$HTTP_CODE" =~ ^[2345][0-9][0-9]$ ]]; then
-              echo "Router responding. Smoke test passed."
+            if [[ "$HTTP_CODE" == "200" ]]; then
+              echo "Router healthy. Smoke test passed."
               break
             fi
             if [[ "$i" -eq "$MAX_RETRIES" ]]; then
-              echo "::error::Router did not respond."
+              echo "::error::Router did not become healthy (last HTTP status: $HTTP_CODE)."
               docker logs router-test
               exit 1
             fi
@@ -301,8 +312,10 @@ jobs:
 
       - name: Summary
         run: |
-          echo "### Release Complete" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- \`${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.upstream_tag }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- \`${{ env.IMAGE_NAME }}:v${{ needs.check-upstream.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- \`${{ env.IMAGE_NAME }}:latest\`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Release Complete"
+            echo ""
+            echo "- \`${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.upstream_tag }}\`"
+            echo "- \`${{ env.IMAGE_NAME }}:v${{ needs.check-upstream.outputs.version }}\`"
+            echo "- \`${{ env.IMAGE_NAME }}:latest\`"
+          } >> "$GITHUB_STEP_SUMMARY"

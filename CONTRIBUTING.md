@@ -2,6 +2,8 @@
 
 Thank you for your contribution to production-stack! As a potential contributor, your changes and ideas are welcome at any hour of the day or night, weekdays, weekends, and holidays. Please do not ever hesitate to ask a question or send a pull request.
 
+For this fork, read [AGENTS.md](AGENTS.md) and the [fork maintenance guide](docs/fork-maintenance.md) for patch conventions, ownership, and releases. The proposal and upstream review guidance below applies when contributing back to `vllm-project/production-stack`.
+
 ## Submitting a Proposal
 
 For **major changes, new features, or significant architectural modifications**, please **submit a proposal** under [proposals/](proposals/) folder using the [designated template](proposals/TEMPLATE.md) before contributing code. This ensures alignment with the project's goals, allows maintainers and contributors to provide feedback early, and helps prevent unnecessary rework.
@@ -36,31 +38,35 @@ Follow the standard GitHub workflow:
 
 ### Linter Checks
 
-Linter checks are parts of our github workflows. To pass all linter checks, please use <code>pre-commit</code> to format your code. It is installed as follows:
+Install the router with the test and lint dependency groups, using Python 3.13 to match the image:
 
 ```bash
-uv sync --all-extras --all-groups
-uv run pre-commit install
+uv venv --python 3.13
+uv pip install -e . --group test --group lint
+.venv/bin/pre-commit install
 ```
+
+The `test` dependency group runs the ordinary router suite without vLLM or a GPU. The optional `test` extra and `--all-extras` install heavyweight engine/cache dependencies; use them only for work that needs those features.
+
+This uses the image's installation approach: resolve from `pyproject.toml`. The current lockfile still selects NumPy 1.26.4, which has no Python 3.13 Linux wheel, so a locally cached installation is not evidence that `uv sync --locked` will work on a fresh runner.
 
 It will run automatically before every commit. You can also run it manually on
 all files with:
 
 ```bash
-uv run pre-commit run --all-files
+.venv/bin/pre-commit run --all-files
 ```
 
 There are a subset of hooks which require additional dependencies that you may
 not have installed in your development environment (i.e. Docker and non-Python
 packages). These are configured to only run in the `manual` `pre-commit` stage.
-In CI they are run in the `pre-commit-manual` job, and locally they can be run
-with:
+The fork does not run these manual hooks in CI. Locally they can be run with:
 
 ```bash
 # Runs all hooks including manual stage hooks
-uv run pre-commit run --all-files --hook-stage manual
+.venv/bin/pre-commit run --all-files --hook-stage manual
 # Runs only the manual stage hook shellcheck
-uv run pre-commit run --all-files --hook-stage manual shellcheck
+.venv/bin/pre-commit run --all-files --hook-stage manual shellcheck
 ```
 
 If any of these hooks are failing in CI but you cannot run them locally, you
@@ -69,14 +75,17 @@ pull request.
 
 > You can read more about `pre-commit` at [https://pre-commit.com](https://pre-commit.com).
 
-### Github Workflows
+### Router Tests and Release Checks
 
-The PR must pass all GitHub workflows, which include:
+Run the regression suite:
 
-- Router E2E tests
-- Functionality tests of the helm chart
+```bash
+.venv/bin/python -m pytest src/tests -q
+```
 
-If any test fails, please check GitHub Actions for details on the failure. If you believe the error is unrelated to your PR, please explain your reasoning in the PR comments.
+For request/configuration changes, also follow the [HTTP verification skill](.agents/skills/verify/SKILL.md) to exercise the live router against a fake engine. Report what ran and any gaps; a unit test or `/health` response alone does not verify inference.
+
+The fork's `build-router.yml` runs the router suite on the upstream release tag plus replayed fork patches before publishing images. HTTP 200 from the published image's `/health` is required before promoting `latest`. The upstream PR, Helm, operator, and lint workflows were removed from this fork; run the relevant local checks before submitting changes. See the [release procedure](docs/fork-maintenance.md#patch-and-release-workflow) for triggers and tag behavior.
 
 ## Adding Examples and Tests
 

@@ -10,6 +10,8 @@ This is a lightweight fork of [vllm-project/production-stack](https://github.com
 - **Qwen rerank template**: Preprocesses `/v1/rerank` requests for `Qwen/Qwen3-Reranker-0.6B` with the required chat template before forwarding to the backend.
 - **`/pooling` route**: Proxies vLLM's `/pooling` endpoint (backend chosen by the request body's `model` field, same as `/v1/embeddings`). Needed for Jina Embeddings v4 multi-vector (ColBERT) output, which vLLM serves only on `/pooling`.
 - **Default port 8080**: Changed from 8001 to match the [vllm-project/router](https://github.com/vllm-project/router) default for easier future migration.
+- **Keep-alive configuration**: `--timeout-keep-alive` (or `timeout_keep_alive` in YAML/JSON) controls uvicorn's idle connection timeout; the default is 5 seconds and changes require a restart.
+- **Model alias discovery**: `/v1/models` lists static aliases alongside canonical model names so clients can discover the names they may request.
 - **numpy unpinned**: `>=1.26.4` instead of `==1.26.4` (no Python 3.13 wheels for 1.26.4).
 - **Request-stats lifecycle fix**: In-flight counters no longer drift upward forever. `on_request_complete` sat outside a `finally`, so a client disconnect (`GeneratorExit`/`CancelledError` — both `BaseException`, so `except Exception` missed them) skipped the decrement and every abandoned request leaked its stage count for the life of the process; the per-request timestamp dicts were never popped even on success, growing without bound. `RequestStatsMonitor` now hands out an opaque per-attempt handle and exposes idempotent `on_request_complete` / `on_request_fail` / `on_request_abort`, retiring each attempt from the stage its own record says it is in. Backend sockets are bounded to match: `--backend-connect-timeout` (10 s) and `--backend-read-timeout` (300 s of silence, not of duration) stop a black-holed engine from hanging a request — and its counters — forever, and timeouts surface as structured **504/502** responses with an OpenAI-style error envelope (SSE streams get an in-band terminal error event) instead of bare 500s. See [Request-stats lifecycle](#request-stats-lifecycle) below.
 - **Dynamic-config file accepts all fork flags**: The `--dynamic-config-yaml` / `--dynamic-config-json` watcher used to reject any key that was not a hot-reloadable field, raising `TypeError` every 10 s and silently killing hot-reload of service discovery / routing. The fork's startup-only flags — the backend socket timeouts — therefore could not live in the config file you already pass, even though they load fine at startup. The watcher now tolerates non-reconfigurable keys: they are honored at startup and ignored (debug-logged) on reload, so you can keep all configuration in one file. See [Loading fork flags from the dynamic config file](#loading-fork-flags-from-the-dynamic-config-file) below.
@@ -19,6 +21,10 @@ Pre-built images are published to Docker Hub, tagged to match upstream releases:
 ```console
 docker pull openimage/production-stack-router:v0.1.10
 ```
+
+The release workflow replays the fork patches onto an upstream release tag and runs the router regression suite before publishing versioned images. It requires HTTP 200 from the image's `/health` before promoting `latest`.
+
+For development, start with [AGENTS.md](AGENTS.md) and the [fork maintenance guide](docs/fork-maintenance.md), which records the release workflow and decisions shared by coding tools.
 
 ### Audio-enabled vLLM serving image
 
@@ -75,6 +81,7 @@ The startup-only fork flags and their config keys:
 |---|---|---|
 | `backend_connect_timeout` | `--backend-connect-timeout` | `10.0` |
 | `backend_read_timeout` | `--backend-read-timeout` | `300.0` |
+| `timeout_keep_alive` | `--timeout-keep-alive` | `5` |
 
 Example:
 
@@ -89,12 +96,13 @@ static_models:
 # Fork flags — same file, no command-line flags needed:
 backend_connect_timeout: 10.0
 backend_read_timeout: 300.0
+timeout_keep_alive: 5
 ```
 
 Three things to know:
 
-- **Keys use underscores, not dashes.** The config key is `backend_read_timeout`, matching the flag's destination — not `backend-read-timeout`. A dashed key matches no flag and is silently ignored.
-- **These flags are read once, at startup.** Editing them in the file while the router runs has no effect until you restart it. Only the hot-reloadable fields (`static_backends`, `routing_logic`, `callbacks`, …) take effect on a live edit; the watcher re-reads the file every 10 s but applies only that subset. The startup-only flags are inert to the watcher, so editing one is a no-op (logged at `debug`), not a reconfigure.
+- **Keys use underscores, not dashes.** The config key is `backend_read_timeout`, matching the flag's destination — not `backend-read-timeout`. A dashed key has no effect at startup and is rejected by the watcher on reload.
+- **These flags are read once, at startup.** Restart to change their effective values. Backend timeout edits are inert to the watcher (logged at `debug`). `timeout_keep_alive` is a legacy dataclass field: editing it triggers a reconfiguration but does not change uvicorn's keep-alive timeout. Only the hot-reloadable settings (`static_backends`, `routing_logic`, `callbacks`, …) take effect on a live edit; the watcher re-reads the file every 10 seconds.
 - **A key that is not a recognized flag is rejected, and your running config is kept.** If the watcher re-reads the file and finds a key that is neither a hot-reloadable field nor a known flag — almost always a typo (e.g. `callback` instead of `callbacks`) — it logs a warning and does **not** reconfigure, so the running configuration is preserved rather than silently reverting the mistyped field to its default. Fix the typo and the next reload applies cleanly.
 
 ---

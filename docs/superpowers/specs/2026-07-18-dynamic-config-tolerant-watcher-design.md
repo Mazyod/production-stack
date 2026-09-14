@@ -87,7 +87,7 @@ This change fixes the root cause rather than deferring it: the dataclass default
 
 ## 5. Caveats
 
-1. **Startup-only.** The fork flags are read once at boot. Editing them in the file while the router runs has no effect until restart (they are inert to the watcher, so the edit is a no-op — not even a reconfigure).
+1. **Startup-only.** The fork flags are read once at boot. Backend timeout edits are inert to the watcher until restart. The `timeout_keep_alive` exception described above triggers reconfiguration but does not change uvicorn's timeout until restart.
 2. **Underscored keys.** No dash→underscore translation happens (`read_and_process_yaml_config_file` uses YAML keys verbatim). The key must be `backend_read_timeout`, not `backend-read-timeout`. A dashed key is *unrecognized* and now raises on the watcher tick (retaining the running config) — and matches no argparse dest at startup, so it also no-ops there.
 3. **Unrecognized keys are rejected, not silently applied.** A key that is neither a field nor a known flag raises on the watcher tick; the watcher logs a warning and keeps the running configuration. This protects against a typo of a hot-reloadable key silently reverting that field to its default.
 
