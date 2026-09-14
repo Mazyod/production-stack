@@ -141,3 +141,35 @@ This document was distilled on 2026-09-14 from the project's Claude memories
 `structured-output-patch-removed`), available project prompt history, Git history,
 and current code. Full session transcripts were unavailable. Personal model,
 notification, permission, and agent-wrapper settings remain outside this repo.
+
+## Maintenance release — 2026-09-14
+
+The confirmed baseline is `vllm-stack-0.1.12`
+(`66b60661aa3052810859a417559e9e830772a091`). Release source
+`5cca5e4414dd07192ff37f7e88da0e6513bb69d3` includes the shared project guidance,
+upstream tag merge, and merge-aware patch replay. All were pushed to `main`.
+[Release run 34873842221](https://github.com/Mazyod/production-stack/actions/runs/34873842221)
+succeeded, publishing `openimage/production-stack-router` for linux/amd64 and
+linux/arm64. Tags `v0.1.12`, `vllm-stack-0.1.12`, and `latest` were verified to
+resolve to `sha256:7144e56c84abcb3e3f42a5eb37dcee16a46945f980a04d3d51e4134b51768733`.
+
+Verification: 29 non-merge patches replayed onto the tag produced a tree
+identical to the release source. All 239 router tests passed locally, in a fresh
+release checkout, and in CI; standard pre-commit hooks passed. Live HTTP checks
+covered aliases, pooling, backend Server-header stripping, YAML-driven 504s,
+terminal SSE errors, healthy streams beyond the read bound, and counter cleanup.
+Operator deployment tests passed (`go test ./internal/controller -run
+'TestDeployment' -count=1`); this was not the full Kubernetes/envtest suite.
+The published image passed the HTTP-200 health gate before `latest` promotion.
+Full Helm dependency validation remained blocked by the local keychain;
+`helm lint` without those dependencies is not full chart validation.
+
+At closeout, upstream `main` was `ebbb8624010514c2d4fa7edf3de95a6440a755b2`:
+28 commits beyond the selected release tag. All 28 were marked `+` by
+`git cherry main upstream/main`, and source comparison confirmed real changes,
+including load-aware/priority routing and FastAPI, aiohttp, and Kubernetes
+dependency updates. GitHub's behind count therefore reflects intentionally
+excluded newer upstream work, not merely equivalent patches with different
+hashes. Evaluate it against the chosen release baseline; do not merge upstream
+main or publish again solely to clear that indicator. Documentation-only
+closeout commits after the release source do not change the published image.
