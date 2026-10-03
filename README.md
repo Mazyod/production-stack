@@ -20,13 +20,14 @@ This is a lightweight fork of [vllm-project/production-stack](https://github.com
 The checkout includes upstream `vllm-stack-0.1.13` and main through `014d070`
 (October 2, 2026), including [priority routing](tutorials/26-priority-routing.md),
 [load-aware routing](docs/source/use_cases/loadaware-routing.rst), discovery fixes,
-and Helm/operator improvements. This source update does not publish an image;
-the last verified fork image remains `v0.1.12`.
+and Helm/operator improvements. The verified fork image is `v0.1.13`, built from
+the upstream release tag plus fork patches; the checkout also includes two
+post-tag upstream commits. See the [release provenance](docs/fork-maintenance.md#authorized-release--2026-10-03).
 
 Pre-built images are published to Docker Hub, tagged to match upstream releases:
 
 ```console
-docker pull openimage/production-stack-router:v0.1.12
+docker pull openimage/production-stack-router:v0.1.13
 ```
 
 The release workflow applies the reconciled fork changes, including merge resolutions, onto an upstream release tag and runs the router regression suite before publishing versioned images. It requires HTTP 200 from the image's `/health` before promoting `latest`.

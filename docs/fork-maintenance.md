@@ -271,5 +271,33 @@ operator, or release-workflow behavior changed during this history cleanup.
 
 The original main `6970618` is retained in
 `backup/main-before-upstream-2026-10-03`; the tested reconciliation remains on
-`reconcile/upstream-2026-10-03`. These refs preserve the history referenced by
-earlier verification and release records.
+`reconcile/upstream-2026-10-03`. Both histories were backed up on origin before
+main changed, as `backup/main-before-upstream-2026-10-03` and
+`backup/reconciliation-2026-10-03`. These refs preserve the history referenced
+by earlier verification and release records. Main was updated using an explicit
+force-with-lease against the observed `6970618` commit. Independent review
+confirmed the seven-commit linear series and complete tree preservation.
+
+## Authorized release — 2026-10-03
+
+Release source `5f2b1424d2091e4151df4a7f7828aed77ac51941` was pushed to main.
+[Release run 37124465268](https://github.com/Mazyod/production-stack/actions/runs/37124465268)
+succeeded using upstream `vllm-stack-0.1.13`
+(`e8cb4959ebfa333714ef468a3aefe158a65a09e6`). CI reconstructed tree
+`a62a47c20d174e926a503aa04167e1eb88908c31`, identical to the locally verified
+release reconstruction. All 316 tests passed both in that local reconstruction
+with locked dependencies and in CI. Standard pre-commit hooks passed on the
+rebased source.
+
+The published linux/amd64 and linux/arm64 image tags `v0.1.13`,
+`vllm-stack-0.1.13`, and `latest` were independently verified to resolve to
+`sha256:0539b9209b5e16a25637830c2a6d99e4f5be392c9439bf2e40a7ca782d6a5bc5`.
+The workflow received HTTP 200 from the published image before promoting latest.
+All live HTTP scenarios listed in the reconciliation section were repeated
+against the digest-pinned published amd64 image and passed, including malformed
+rerank bodies, multipart responses, timeouts, cancellation/counter cleanup, and
+configuration reload behavior. ARM64 execution and real GPU inference were not
+tested. The two inherited Helm assertion failures recorded above remain.
+
+The subsequent README and maintenance closeout changes only document this
+publication; they do not change the image source or trigger another release.
