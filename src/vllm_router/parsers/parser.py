@@ -279,9 +279,11 @@ def build_parser() -> argparse.ArgumentParser:
             "roundrobin",
             "session",
             "kvaware",
+            "loadaware",
             "prefixaware",
             "disaggregated_prefill",
             "disaggregated_prefill_orchestrated",
+            "priority",
         ],
         help="The routing logic to use",
     )
@@ -443,14 +445,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--sentry-traces-sample-rate",
         type=float,
         default=0.1,
-        help="The sample rate for Sentry traces. Default is 0.1 (10%)",
+        help="The sample rate for Sentry traces. Default is 0.1 (10%%)",
     )
 
     parser.add_argument(
         "--sentry-profile-session-sample-rate",
         type=float,
         default=1.0,
-        help="The sample rate for Sentry profiling sessions. Default is 1.0 (100%)",
+        help="The sample rate for Sentry profiling sessions. Default is 1.0 (100%%)",
     )
 
     # OpenTelemetry tracing arguments
@@ -495,6 +497,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "--loadaware-beta",
+        type=float,
+        default=None,
+        help="Weight on the load penalty for loadaware routing: "
+        "score = cached_fraction - beta * relative_load. Falls back to the "
+        "LOADAWARE_BETA environment variable, then to 1.0.",
+    )
+
+    parser.add_argument(
         "--prefix-min-match-length",
         type=int,
         default=0,
@@ -505,6 +516,43 @@ def build_parser() -> argparse.ArgumentParser:
         "chunks (chunk_size, default 128 characters), so this "
         "threshold is effectively quantized to that granularity. "
         "Defaults to 0, which disables the threshold.",
+    )
+
+    parser.add_argument(
+        "--priority-header",
+        type=str,
+        default="x-request-priority",
+        help="The request header carrying the per-request priority for "
+        "priority routing. Lower values mean higher priority. "
+        "Only used when --routing-logic=priority.",
+    )
+
+    parser.add_argument(
+        "--priority-field",
+        type=str,
+        default="priority",
+        help="The request body field carrying the per-request priority for "
+        "priority routing, used when the header is absent. This value is "
+        "also injected into the forwarded body so vLLM's priority "
+        "scheduler can use it. Only used when --routing-logic=priority.",
+    )
+
+    parser.add_argument(
+        "--priority-default",
+        type=int,
+        default=0,
+        help="The priority to use when a request provides none via the "
+        "header or body field. Only used when --routing-logic=priority.",
+    )
+
+    parser.add_argument(
+        "--priority-threshold",
+        type=int,
+        default=None,
+        help="Requests with priority strictly less than this value are "
+        "routed to the least-loaded engine; all other requests round-robin "
+        "across all engines. Defaults to the value of --priority-default. "
+        "Only used when --routing-logic=priority.",
     )
 
     parser.add_argument(

@@ -24,7 +24,7 @@ import aiohttp
 # --- Request Processing & Routing ---
 from aiohttp import FormData
 from fastapi import BackgroundTasks, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from requests import JSONDecodeError
 
 from vllm_router.aiohttp_client import (
@@ -37,6 +37,7 @@ from vllm_router.routers.routing_logic import (
     DisaggregatedPrefillRouter,
     KvawareRouter,
     PrefixAwareRouter,
+    PriorityRouter,
     SessionRouter,
 )
 from vllm_router.service_discovery import get_service_discovery
@@ -189,6 +190,11 @@ def _sse_stall_frames(client_timeout: aiohttp.ClientTimeout) -> tuple[bytes, byt
         }
     )
     return f"data: {payload}\n\n".encode(), b"data: [DONE]\n\n"
+
+
+def _is_json_media_type(content_type: str) -> bool:
+    media_type = content_type.partition(";")[0].strip().lower()
+    return media_type == "application/json" or media_type.endswith("+json")
 
 
 async def process_external_provider_request(
@@ -570,7 +576,21 @@ async def route_general_request(
     # Same as vllm, Get request_id from X-Request-Id header if available
     request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
     request_body = await request.body()
-    request_json = json.loads(request_body) if request_body else {}
+    try:
+        request_json = json.loads(request_body) if request_body else {}
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid request: request body must be valid JSON."},
+            headers={"X-Request-Id": request_id},
+        )
+
+    if not isinstance(request_json, dict):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid request: request body must be a JSON object."},
+            headers={"X-Request-Id": request_id},
+        )
 
     # OpenTelemetry tracing: extract incoming context and create parent span
     span, span_context = None, None
@@ -714,7 +734,8 @@ async def route_general_request(
         )
 
     elif isinstance(
-        request.app.state.router, (KvawareRouter, PrefixAwareRouter, SessionRouter)
+        request.app.state.router,
+        (KvawareRouter, PrefixAwareRouter, SessionRouter, PriorityRouter),
     ):
         server_url = await request.app.state.router.route_request(
             endpoints, engine_stats, request_stats, request, request_json
@@ -723,6 +744,12 @@ async def route_general_request(
         server_url = request.app.state.router.route_request(
             endpoints, engine_stats, request_stats, request
         )
+
+    if isinstance(request.app.state.router, PriorityRouter):
+        # PriorityRouter injects the resolved priority into request_json so
+        # vLLM's own priority scheduler can preempt within the engine.
+        request_body = json.dumps(request_json)
+        update_content_length(request, request_body)
 
     curr_time = time.time()
     # Extract actual session ID from request headers for logging
@@ -762,7 +789,7 @@ async def route_general_request(
                 server_url = remaining[0].url
             elif isinstance(
                 request.app.state.router,
-                (KvawareRouter, PrefixAwareRouter, SessionRouter),
+                (KvawareRouter, PrefixAwareRouter, SessionRouter, PriorityRouter),
             ):
                 server_url = await request.app.state.router.route_request(
                     remaining, engine_stats, request_stats, request, request_json
@@ -1337,6 +1364,8 @@ async def route_general_transcriptions(
 ):
     """Handles audio transcription requests by parsing form data and proxying to backend."""
 
+    request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+
     try:
         form = await request.form()
 
@@ -1348,12 +1377,19 @@ async def route_general_transcriptions(
         temperature: Optional[float] = (
             float(temperature_str) if temperature_str is not None else None
         )
-        language: Optional[str] = form.get("language", "en")
+        language: Optional[str] = form.get("language")
         stream: bool = form.get("stream", "false").lower() == "true"
     except KeyError as e:
         return JSONResponse(
             status_code=400,
             content={"error": f"Invalid request: missing '{e.args[0]}' in form data."},
+            headers={"X-Request-Id": request_id},
+        )
+    except (TypeError, ValueError):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid multipart/form-data request"},
+            headers={"X-Request-Id": request_id},
         )
 
     logger.debug("==== Enter audio_transcriptions ====")
@@ -1371,7 +1407,16 @@ async def route_general_transcriptions(
     payload_bytes = await file.read()
     files = {"file": (file.filename, payload_bytes, file.content_type)}
 
-    data = {"model": model, "language": language}
+    data = {"model": model}
+
+    if isinstance(language, str):
+        language_stripped = language.strip()
+        if language_stripped and language_stripped.lower() not in (
+            "none",
+            "null",
+            "undefined",
+        ):
+            data["language"] = language_stripped
 
     if prompt:
         data["prompt"] = prompt
@@ -1398,12 +1443,12 @@ async def route_general_transcriptions(
     )
 
 
-async def route_image_edit_request(
+async def route_multipart_request(
     request: Request,
     endpoint: str,
     background_tasks: BackgroundTasks,
 ):
-    """Route OpenAI-compatible image edit requests (multipart/form-data)."""
+    """Route OpenAI-compatible multipart/form-data requests."""
 
     body = await request.body()
     try:
@@ -1415,7 +1460,7 @@ async def route_image_edit_request(
             content={"error": "Invalid multipart/form-data request"},
         )
 
-    logger.debug("Routing image edit request with model %s", model)
+    logger.debug("Routing multipart request with model %s", model)
 
     return await proxy_multipart_request(body, model, endpoint, request)
 
@@ -1458,12 +1503,38 @@ async def proxy_multipart_request(
     request_stats = request_stats_monitor.get_request_stats(time.time())
 
     # pick one using the router's configured logic (roundrobin, least-loaded, etc.)
-    chosen_url = router.route_request(
-        endpoints,
-        engine_stats,
-        request_stats,
-        request,
-    )
+    if isinstance(
+        router,
+        (
+            KvawareRouter,
+            PrefixAwareRouter,
+            SessionRouter,
+            PriorityRouter,
+            DisaggregatedPrefillOrchestratedRouter,
+        ),
+    ):
+        chosen_url = await router.route_request(
+            endpoints,
+            engine_stats,
+            request_stats,
+            request,
+            {"model": model, "prompt": ""},  # no text prefix for multipart routing
+        )
+    elif isinstance(router, DisaggregatedPrefillRouter):
+        chosen_url = router.route_request(
+            endpoints,
+            engine_stats,
+            request_stats,
+            request,
+            {},  # no JSON body for multipart/form-data
+        )
+    else:
+        chosen_url = router.route_request(
+            endpoints,
+            engine_stats,
+            request_stats,
+            request,
+        )
     logger.info(
         "Proxying multi-part form request for model %s to %s", model, chosen_url
     )
@@ -1554,12 +1625,23 @@ async def proxy_multipart_request(
         outcome = "abort"
         try:
             request_stats_monitor.on_request_response(request_handle, time.time())
-            response_content = await backend_response.json()
-            response = JSONResponse(
-                content=response_content,
-                status_code=backend_response.status,
-                headers=resp_headers,
-            )
+            content_type = backend_response.headers.get("content-type", "")
+            media_type = content_type.partition(";")[0].strip().lower()
+            # Audio formats such as text/SRT/VTT are valid opaque responses.
+            # Keep the fork's 502 contract for HTML backend error pages.
+            if not _is_json_media_type(content_type) and media_type != "text/html":
+                response = Response(
+                    content=await backend_response.read(),
+                    status_code=backend_response.status,
+                    headers=resp_headers,
+                )
+            else:
+                response_content = await backend_response.json()
+                response = JSONResponse(
+                    content=response_content,
+                    status_code=backend_response.status,
+                    headers=resp_headers,
+                )
         except (aiohttp.ContentTypeError, json.JSONDecodeError) as parse_error:
             try:
                 text_content = await backend_response.text()

@@ -806,6 +806,20 @@ class K8sPodIPServiceDiscovery(ServiceDiscovery):
 
         elif event == "MODIFIED":
             if engine_ip is None:
+                # An empty IP is ambiguous: a Pending pod has not been
+                # assigned an IP yet (skip it), but an Evicted pod has had
+                # its podIP cleared by the kubelet. In the latter case the
+                # endpoint is already registered and must be removed, or it
+                # lingers as a stale ("ghost") backend that still receives
+                # traffic until the router process restarts. Complete the
+                # symmetric removal path here.
+                if engine_name in self.available_engines:
+                    logger.warning(
+                        f"Serving engine {engine_name} has an empty IP "
+                        f"(likely evicted, podIP cleared by kubelet); "
+                        f"removing it to avoid a stale (ghost) endpoint"
+                    )
+                    self._delete_engine(engine_name)
                 return
 
             if is_pod_ready and model_names:
@@ -1015,10 +1029,16 @@ class K8sServiceNameServiceDiscovery(ServiceDiscovery):
             enable_sleep_mode = False
             for container in pods.items[0].spec.containers:
                 if container.name == "vllm":
-                    for arg in container.command:
-                        if arg == "--enable-sleep-mode":
-                            enable_sleep_mode = True
-                            break
+                    # container.command is None whenever the pod does not
+                    # override the image entrypoint, which is an ordinary
+                    # deployment rather than a signal that sleep mode is off.
+                    # Same guard as K8sPodIPServiceDiscovery above.
+                    if (
+                        not container.command
+                        or "--enable-sleep-mode" in container.command
+                    ):
+                        enable_sleep_mode = True
+                    break
             return enable_sleep_mode
         except client.rest.ApiException as e:
             logger.error(

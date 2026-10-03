@@ -193,7 +193,7 @@ async def test_transcription_non_streaming_returns_json_response(setup_mocks):
 
 
 @pytest.mark.asyncio
-async def test_non_streaming_non_json_response_returns_502_and_completes(setup_mocks):
+async def test_non_streaming_html_response_returns_502_and_completes(setup_mocks):
     req = _make_mock_request()
     parse_error = aiohttp.ContentTypeError(
         MagicMock(), (), message="unexpected content type"
@@ -226,7 +226,7 @@ async def test_non_streaming_non_json_response_returns_502_and_completes(setup_m
 
 
 @pytest.mark.asyncio
-async def test_non_streaming_non_json_text_read_failure_returns_502_and_completes(
+async def test_non_streaming_html_text_read_failure_returns_502_and_completes(
     setup_mocks,
 ):
     req = _make_mock_request()
@@ -514,18 +514,23 @@ async def test_streaming_abandon_before_first_chunk_without_aclose_retires_prefi
 
 
 @pytest.mark.asyncio
-async def test_non_streaming_cancellation_during_json_read_aborts(setup_mocks):
+@pytest.mark.parametrize(
+    "content_type,read_method", [("application/json", "json"), ("text/plain", "read")]
+)
+async def test_non_streaming_cancellation_during_body_read_aborts(
+    setup_mocks, content_type, read_method
+):
     req = _make_mock_request()
     reading = asyncio.Event()
 
-    async def read_json():
+    async def read_body():
         reading.set()
         await asyncio.Event().wait()
 
     backend_response = MagicMock()
     backend_response.status = 200
-    backend_response.headers = {"content-type": "application/json"}
-    backend_response.json = read_json
+    backend_response.headers = {"content-type": content_type}
+    setattr(backend_response, read_method, read_body)
     backend_response.close = MagicMock()
     client = MagicMock()
     client.post = AsyncMock(return_value=backend_response)

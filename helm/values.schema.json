@@ -191,6 +191,15 @@
                 }
             }
         },
+        "k8s-aibom": {
+            "description": "Optional runtime AI inventory (k8s-aibom). When enabled, a lightweight, unprivileged controller generates a CycloneDX 1.6 ML-BOM for AI workloads in namespaces labeled aibom.k8saibom.dev/enabled=true — including the vLLM deployments this chart manages. Disabled by default; nothing is inventoried without both this flag and the namespace opt-in label.",
+            "type": "object",
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                }
+            }
+        },
         "kube-prometheus-stack": {
             "description": "Kube Prometheus Stack dependency chart configuration. More values can be found [here](https://github.com/prometheus-community/helm-charts/blob/main/charts/kube-prometheus-stack/values.yaml).",
             "type": "object"
@@ -426,6 +435,10 @@
                 "resources": {
                     "description": "lora controller resources",
                     "type": "object"
+                },
+                "serviceAccountName": {
+                    "description": "The name of an existing service account to use for the lora controller deployment.",
+                    "type": "string"
                 },
                 "tolerations": {
                     "description": "Tolerations",
@@ -885,6 +898,10 @@
                     "description": "Pod-level security context configuration. https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.32/#podsecuritycontext-v1-core",
                     "type": "object"
                 },
+                "serviceAccountName": {
+                    "description": "The name of an existing service account to use for the router deployment.",
+                    "type": "string"
+                },
                 "serviceAnnotations": {
                     "description": "Service annotations if you use a LoadBalancer or NodePort service type",
                     "type": "object"
@@ -1105,6 +1122,20 @@
                             "annotations": {
                                 "description": "The annotations to add to the deployment",
                                 "type": "object"
+                            },
+                            "args": {
+                                "description": "Optional container args for the main vLLM container. Used with command to override the default vllm serve invocation.",
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                }
+                            },
+                            "command": {
+                                "description": "Optional container command for the main vLLM container. Replaces the default vllm serve invocation.",
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                }
                             },
                             "enableLoRA": {
                                 "description": "Whether to enable LoRA",
@@ -1455,54 +1486,6 @@
                                             "requestMemory": {
                                                 "description": "Memory request for the head node",
                                                 "type": "string"
-                                            },
-                                            "resources": {
-                                                "description": "Raw Kubernetes resources block for the head node container. If specified, takes priority over the simplified request* fields.",
-                                                "type": "object"
-                                            },
-                                            "initContainer": {
-                                                "description": "The configuration for an init container to be run before the Ray head container starts.",
-                                                "type": "object",
-                                                "properties": {
-                                                    "args": {
-                                                        "description": "Additional arguments to pass to the command",
-                                                        "type": "array",
-                                                        "items": {
-                                                            "type": "string"
-                                                        }
-                                                    },
-                                                    "command": {
-                                                        "description": "The command to run in the init container",
-                                                        "type": "array",
-                                                        "items": {
-                                                            "type": "string"
-                                                        }
-                                                    },
-                                                    "env": {
-                                                        "description": "List of environment variables to set in the container",
-                                                        "type": "array"
-                                                    },
-                                                    "extraVolumeMounts": {
-                                                        "description": "Additional volume mounts to add to the init container, in Kubernetes volumeMount format.",
-                                                        "type": "array"
-                                                    },
-                                                    "image": {
-                                                        "description": "The Docker image for the init container",
-                                                        "type": "string"
-                                                    },
-                                                    "mountPvcStorage": {
-                                                        "description": "Whether to mount the model's PVC storage into the init container",
-                                                        "type": "boolean"
-                                                    },
-                                                    "name": {
-                                                        "description": "The name of the init container",
-                                                        "type": "string"
-                                                    },
-                                                    "resources": {
-                                                        "description": "The resource requests and limits for the init container",
-                                                        "type": "object"
-                                                    }
-                                                }
                                             }
                                         }
                                     }

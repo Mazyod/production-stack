@@ -179,13 +179,26 @@ def test_recognized_startup_only_key_is_tolerated_not_rejected():
     assert cfg.service_discovery == "static"
 
 
-def test_from_args_matches_from_yaml_for_unchanged_file(monkeypatch):
+@pytest.mark.parametrize(
+    "routing_options",
+    [
+        {"routing_logic": "roundrobin"},
+        {
+            "routing_logic": "priority",
+            "priority_header": "x-prio",
+            "priority_field": "request_priority",
+            "priority_default": 7,
+            "priority_threshold": 2,
+        },
+    ],
+)
+def test_from_args_matches_from_yaml_for_unchanged_file(monkeypatch, routing_options):
     # The startup baseline (from_args) must equal what the watcher's first tick
     # reads (from_yaml) for the same, unchanged file, so the first tick is a
     # genuine no-op and cannot fire a spurious reconfigure that races startup.
     document = {
         "service_discovery": "static",
-        "routing_logic": "roundrobin",
+        **routing_options,
         "static_models": {"m1": {"static_backends": ["http://vllm-worker:8000"]}},
         **FORK_STARTUP_ONLY_FLAGS,
     }
