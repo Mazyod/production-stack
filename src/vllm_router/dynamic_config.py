@@ -15,8 +15,9 @@
 import json
 import threading
 import time
-from dataclasses import dataclass
-from typing import Literal, Optional
+from dataclasses import dataclass, fields
+from functools import lru_cache
+from typing import Any, Literal, Optional
 
 from fastapi import FastAPI
 
@@ -38,6 +39,20 @@ from vllm_router.utils import (
 )
 
 logger = init_logger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _recognized_arg_dests() -> frozenset[str]:
+    """Every argparse destination the router accepts on the command line.
+
+    Loaded lazily (and cached) from the same parser used at startup, so it
+    stays in sync with the flags automatically. Used to tell a legitimate
+    startup-only flag in the config file (e.g. ``backend_read_timeout``) apart
+    from a typo of a reconfigurable field (e.g. ``callback`` for ``callbacks``).
+    """
+    from vllm_router.parsers.parser import build_parser
+
+    return frozenset(action.dest for action in build_parser()._actions)
 
 
 @dataclass
@@ -62,9 +77,14 @@ class DynamicRouterConfig:
     static_backend_health_check_timeout_seconds: Optional[int] = 10
     prefill_model_labels: Optional[str] = None
     decode_model_labels: Optional[str] = None
-    k8s_port: Optional[int] = None
-    k8s_namespace: Optional[str] = None
-    k8s_label_selector: Optional[str] = None
+    # Defaults deliberately match the argparse defaults in parser.py so that
+    # from_args() and from_yaml() agree for a file that omits these keys. A
+    # mismatch here makes the watcher's first tick see config != current_config
+    # for an unchanged file and fire a spurious reconfigure that can race
+    # startup (see docs/superpowers/specs/2026-07-18-...-design.md).
+    k8s_port: Optional[int] = 8000
+    k8s_namespace: Optional[str] = "default"
+    k8s_label_selector: Optional[str] = ""
 
     # Routing logic configurations
     session_key: Optional[str] = None
@@ -75,6 +95,11 @@ class DynamicRouterConfig:
 
     # Logging Options
     callbacks: Optional[str] = None
+
+    # Server configurations
+    # Startup-only: applied when the uvicorn server boots, not hot-reloaded.
+    # Declared here so it is accepted (not rejected) in the config file.
+    timeout_keep_alive: Optional[int] = 5
 
     # Batch API configurations
     # TODO (ApostaC): Support dynamic reconfiguration of batch API
@@ -97,10 +122,13 @@ class DynamicRouterConfig:
             static_backends=args.static_backends,
             static_models=args.static_models,
             static_model_types=args.static_model_types,
+            static_model_labels=args.static_model_labels,
             static_aliases=args.static_aliases,
             static_backend_health_checks=args.static_backend_health_checks,
             static_backend_health_check_interval=args.static_backend_health_check_interval,
             static_backend_health_check_timeout_seconds=args.static_backend_health_check_timeout_seconds,
+            prefill_model_labels=args.prefill_model_labels,
+            decode_model_labels=args.decode_model_labels,
             k8s_port=args.k8s_port,
             k8s_namespace=args.k8s_namespace,
             k8s_label_selector=args.k8s_label_selector,
@@ -113,18 +141,67 @@ class DynamicRouterConfig:
             priority_threshold=args.priority_threshold,
             # Logging Options
             callbacks=args.callbacks,
+            # Server configurations
+            timeout_keep_alive=args.timeout_keep_alive,
+        )
+
+    @classmethod
+    def _from_config_dict(cls, config: dict[str, Any]) -> "DynamicRouterConfig":
+        """Build a config from a raw file dict, tolerating startup-only flags.
+
+        The dynamic-config file is a single source of truth an operator may
+        also use to set startup-only flags (the backend socket timeouts,
+        etc.). Those are honored at startup via
+        ``parser.set_defaults`` but are not reconfigurable fields, so the
+        watcher must accept and ignore them instead of raising ``TypeError``
+        on the strict ``cls(**config)`` construction.
+
+        Keys are classified, not blanket-dropped:
+
+        - **Reconfigurable fields** are applied.
+        - **Recognized startup-only flags** (any argparse destination that is
+          not a reconfigurable field) are ignored and logged at debug.
+        - **Anything else** is almost certainly a typo. A dropped typo of a
+          reconfigurable field would silently revert that field to its default
+          on the next tick (e.g. ``callback`` -> ``callbacks`` disables
+          callbacks), so unrecognized keys raise instead. The watcher's caller
+          catches this and keeps the running configuration.
+        """
+        known_fields = {f.name for f in fields(cls)}
+        extra = [key for key in config if key not in known_fields]
+        recognized = _recognized_arg_dests()
+
+        startup_only = sorted(key for key in extra if key in recognized)
+        unrecognized = sorted(key for key in extra if key not in recognized)
+
+        if startup_only:
+            logger.debug(
+                "DynamicConfigWatcher: ignoring startup-only config keys "
+                "(honored at startup, not hot-reloaded): %s",
+                ", ".join(startup_only),
+            )
+        if unrecognized:
+            raise ValueError(
+                "Unrecognized dynamic-config key(s) "
+                f"{unrecognized}: not a reconfigurable field or a known flag. "
+                "Refusing to reconfigure so the running configuration is kept; "
+                "check for a typo (e.g. a dropped trailing 's')."
+            )
+
+        return cls(
+            **{key: value for key, value in config.items() if key in known_fields}
         )
 
     @staticmethod
     def from_yaml(yaml_path: str) -> "DynamicRouterConfig":
         config = read_and_process_yaml_config_file(yaml_path)
-        return DynamicRouterConfig(**config)
+        return DynamicRouterConfig._from_config_dict(config)
 
     @staticmethod
     def from_json(json_path: str) -> "DynamicRouterConfig":
         with open(json_path, "r") as f:
             config = json.load(f)
-        return DynamicRouterConfig(**config)
+        return DynamicRouterConfig._from_config_dict(config)
 
     def to_json_str(self) -> str:
         return json.dumps(self, default=lambda o: o.__dict__, sort_keys=True, indent=4)
