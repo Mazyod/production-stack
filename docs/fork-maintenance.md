@@ -12,27 +12,35 @@ append follow-up commits after publication. Prefer upstream behavior when a
 workaround is no longer needed. Commit bodies explain the reason and report
 actual verification, including failures or checks that were not run.
 
-Sync the checkout by merging the latest upstream release tag, preserving
-published history. The release replays only non-merge fork commits: upstream
-sync merges are excluded because the target tag already contains their changes.
-If a sync requires a fork-specific conflict fix, retain that fix as a separate
-replayable patch and verify the reconstructed release tree. Changes newer than
-the selected upstream tag need explicit backport patches; merging upstream main
-alone does not include them in the released image.
+Normally sync the checkout by merging the latest upstream release tag,
+preserving published history. A requested sync of upstream main can include
+newer work in the checkout; the released image still uses the selected tag.
+Choose a release containing the upstream features needed in the image.
+
+The release applies the reconciled fork tree's difference from its merge base
+with upstream main. This includes conflict resolutions recorded in merge
+commits and excludes upstream-only changes newer than the selected tag.
+Historical per-commit replay was replaced in October 2026: it failed on the
+NumPy patch after upstream changed adjacent dependencies, and could not retain
+merge-only lifecycle reconciliation. Published history remains intact.
 
 The [image workflow](../.github/workflows/build-router.yml) does the following:
 
 1. Resolves an upstream `vllm-stack-*` tag, or uses a manually supplied tag.
-2. Finds the merge base with upstream main and collects subsequent fork commits.
-3. Checks out the upstream release tag and replays those commits in order.
-   Patch deletions win modify/delete conflicts; other conflicts fail the build.
+2. Finds the merge base with upstream main and exports the binary fork delta.
+3. Uses [prepare-router-release.sh](../.github/scripts/prepare-router-release.sh)
+   to check out the tag, retain fork deletions, and apply the remaining delta
+   with a three-way merge. Every apply failure stops the build, including errors
+   that do not leave unmerged index entries. The source commit, upstream base,
+   target commit, and resulting tree are recorded.
 4. Runs `src/tests` on that reconstructed source before building and publishing
    the amd64/arm64 images to `openimage/production-stack-router`.
 5. Requires HTTP 200 from the published image's `/health` before promoting
    `latest`. Versioned tags are already published at this point.
 
 Triggers are a Monday schedule, manual dispatch, and pushes to `main` touching
-`docker/Dockerfile`, `src/vllm_router/**`, `pyproject.toml`, or the workflow itself.
+`docker/Dockerfile`, `src/vllm_router/**`, `pyproject.toml`, the release-source
+script, or the workflow itself.
 Docs-only and tests-only pushes do not trigger publication. Scheduled runs and
 dispatches without a supplied tag skip an already-published upstream version;
 an explicit tag forces a build. These existing trigger rules are intentional
@@ -42,7 +50,9 @@ Images get `vllm-stack-X.Y.Z`, `vX.Y.Z`, and, after the smoke test, `latest` tag
 A qualifying push can overwrite the versioned tags with newer fork patches.
 Record the source commit, upstream tag, workflow run, and image digest when
 reporting a release. The image source is upstream-tag-plus-patches, not simply
-the checkout's HEAD; passing local tests alone does not verify that replay.
+the checkout's HEAD; passing local tests alone does not verify reconstruction.
+Run the release-source script in a disposable clean clone, compare the resulting
+tree with the intended source, and run the suite there before publishing.
 
 GitHub CLI can resolve this checkout to upstream. Use explicit repository names:
 
@@ -173,3 +183,38 @@ excluded newer upstream work, not merely equivalent patches with different
 hashes. Evaluate it against the chosen release baseline; do not merge upstream
 main or publish again solely to clear that indicator. Documentation-only
 closeout commits after the release source do not change the published image.
+
+
+## Upstream reconciliation — 2026-10-03
+
+At the user's request, the checkout includes upstream main through
+`014d070e6f7611978d321bdb05cbe9a934b614e7`, including `vllm-stack-0.1.13`
+(`e8cb4959ebfa333714ef468a3aefe158a65a09e6`). The two post-tag commits add Helm
+container command/args support and E2E cleanup waits. Those upstream-only
+changes belong to the checkout, not a router image reconstructed on 0.1.13.
+This sync preserves published history; it is not a release authorization.
+
+Upstream #1072 now retires in-flight counts from the recorded stage and clears
+request timestamps. It still keys attempts by caller-controlled request ID and
+uses a single completion outcome. The fork retains opaque handles, collision
+isolation, separate completion/failure/abort outcomes, locking, and all backend
+timeout/error contracts. Its existing lifecycle suites cover the incoming
+upstream statistics tests and replace that duplicate suite's obsolete API.
+
+Upstream audio fixes now support translation multipart bodies, non-JSON audio
+formats, and automatic language detection. Reconciliation also awaits priority
+routing and supplies an empty prompt for prefix routing of multipart requests.
+Valid text/SRT/VTT responses pass through unchanged; HTML backend error pages
+and malformed JSON retain the fork's structured 502 behavior. Raw-body reads
+use the same completion/cancellation cleanup as JSON reads.
+
+Priority routing configuration works with the tolerant config watcher, including
+custom fields and headers. Existing reload limitations described above remain;
+`loadaware_beta` is also startup-only and is not retained by a later router
+reconfiguration. No claim of full routing-parameter hot reload is made.
+
+Dependency reconciliation keeps the fork's Python 3.13/NumPy compatibility,
+adopts upstream FastAPI/aiohttp/Kubernetes constraints, and refreshes the lock
+including patched Starlette. Lightweight tests explicitly depend on `httpx`.
+Upstream Gatekeeper and gateway CI workflows remain disabled along with the
+previously removed upstream workflows; the fork owns its router image workflow.

@@ -14,7 +14,14 @@ This is a lightweight fork of [vllm-project/production-stack](https://github.com
 - **Model alias discovery**: `/v1/models` lists static aliases alongside canonical model names so clients can discover the names they may request.
 - **numpy unpinned**: `>=1.26.4` instead of `==1.26.4` (no Python 3.13 wheels for 1.26.4).
 - **Request-stats lifecycle fix**: In-flight counters no longer drift upward forever. `on_request_complete` sat outside a `finally`, so a client disconnect (`GeneratorExit`/`CancelledError` — both `BaseException`, so `except Exception` missed them) skipped the decrement and every abandoned request leaked its stage count for the life of the process; the per-request timestamp dicts were never popped even on success, growing without bound. `RequestStatsMonitor` now hands out an opaque per-attempt handle and exposes idempotent `on_request_complete` / `on_request_fail` / `on_request_abort`, retiring each attempt from the stage its own record says it is in. Backend sockets are bounded to match: `--backend-connect-timeout` (10 s) and `--backend-read-timeout` (300 s of silence, not of duration) stop a black-holed engine from hanging a request — and its counters — forever, and timeouts surface as structured **504/502** responses with an OpenAI-style error envelope (SSE streams get an in-band terminal error event) instead of bare 500s. See [Request-stats lifecycle](#request-stats-lifecycle) below.
+- **Multipart compatibility**: Includes upstream audio translation routing, text/SRT/VTT responses, and automatic transcription language detection. Priority and prefix routing also work with multipart requests. HTML backend error pages and malformed JSON still return 502, with the fork's lifecycle cleanup preserved.
 - **Dynamic-config file accepts all fork flags**: The `--dynamic-config-yaml` / `--dynamic-config-json` watcher used to reject any key that was not a hot-reloadable field, raising `TypeError` every 10 s and silently killing hot-reload of service discovery / routing. The fork's startup-only flags — the backend socket timeouts — therefore could not live in the config file you already pass, even though they load fine at startup. The watcher now tolerates non-reconfigurable keys: they are honored at startup and ignored (debug-logged) on reload, so you can keep all configuration in one file. See [Loading fork flags from the dynamic config file](#loading-fork-flags-from-the-dynamic-config-file) below.
+
+The checkout includes upstream `vllm-stack-0.1.13` and main through `014d070`
+(October 2, 2026), including [priority routing](tutorials/26-priority-routing.md),
+[load-aware routing](docs/source/use_cases/loadaware-routing.rst), discovery fixes,
+and Helm/operator improvements. This source update does not publish an image;
+the last verified fork image remains `v0.1.12`.
 
 Pre-built images are published to Docker Hub, tagged to match upstream releases:
 
@@ -22,7 +29,7 @@ Pre-built images are published to Docker Hub, tagged to match upstream releases:
 docker pull openimage/production-stack-router:v0.1.12
 ```
 
-The release workflow replays the fork patches onto an upstream release tag and runs the router regression suite before publishing versioned images. It requires HTTP 200 from the image's `/health` before promoting `latest`.
+The release workflow applies the reconciled fork changes, including merge resolutions, onto an upstream release tag and runs the router regression suite before publishing versioned images. It requires HTTP 200 from the image's `/health` before promoting `latest`.
 
 For development, start with [AGENTS.md](AGENTS.md) and the [fork maintenance guide](docs/fork-maintenance.md), which records the release workflow and decisions shared by coding tools.
 
@@ -38,9 +45,9 @@ docker pull openimage/vllm-openai-audio:v0.25.1
 
 ### Request-stats lifecycle
 
-`RequestStatsMonitor` tracks in-flight requests as per-engine counters split by stage: `on_new_request` increments `in_prefill_requests`, the first response token moves the count to `in_decoding_requests`, and completion retires it. Upstream, the completion hook sits outside a `finally`, so any terminal path that is not a clean return skips it.
+`RequestStatsMonitor` tracks in-flight requests as per-engine counters split by stage: `on_new_request` increments `in_prefill_requests`, the first response token moves the count to `in_decoding_requests`, and completion retires it. At the original fork baseline, the completion hook sat outside a `finally`, so terminal paths other than a clean return skipped it. Upstream `0.1.13` now includes stage-aware cleanup, but the fork retains additional guarantees: independent attempt identities, explicit terminal outcomes, thread safety, and bounded backend silence.
 
-The counters are per-engine aggregates rather than per-request, so adding a `finally` alone is not sufficient and is actively harmful: retiring a request that never reached decoding decrements `in_decoding_requests` anyway, stealing the decrement owed to a *different* concurrent request while the aborted request's prefill count leaks regardless. Upstream's multipart path demonstrates this — it already has the `finally` and still corrupts counters.
+The counters are per-engine aggregates rather than per-request, so adding a `finally` alone is not sufficient and is actively harmful: retiring a request that never reached decoding decrements `in_decoding_requests` anyway, stealing the decrement owed to a *different* concurrent request while the aborted request's prefill count leaks regardless. The fork therefore preserves stage-aware finalization alongside the upstream cleanup fix.
 
 The monitor now issues an opaque handle per backend attempt. The external `X-Request-Id` is caller-controlled and two concurrent requests may share one, so it is retained as metadata only and never used as identity. Each attempt has one authoritative active record naming the stage it is in; the finalizer pops that record first and retires the attempt from its recorded stage, which makes repeated or unknown finalization a no-op. All state and snapshots are guarded by a `threading.RLock`, because `--log-stats` runs a real OS thread that reads the same sliding-window buffers the event loop mutates.
 

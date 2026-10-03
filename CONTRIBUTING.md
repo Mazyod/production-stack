@@ -48,7 +48,7 @@ uv pip install -e . --group test --group lint
 
 The `test` dependency group runs the ordinary router suite without vLLM or a GPU. The optional `test` extra and `--all-extras` install heavyweight engine/cache dependencies; use them only for work that needs those features.
 
-This uses the image's installation approach: resolve from `pyproject.toml`. The current lockfile still selects NumPy 1.26.4, which has no Python 3.13 Linux wheel, so a locally cached installation is not evidence that `uv sync --locked` will work on a fresh runner.
+This uses the image's installation approach: resolve from `pyproject.toml`. The refreshed lockfile also supports Python 3.13 and selects patched Starlette. For a reproducible lightweight environment, use `uv sync --locked --group test --group lint` without optional extras.
 
 It will run automatically before every commit. You can also run it manually on
 all files with:
@@ -85,7 +85,7 @@ Run the regression suite:
 
 For request/configuration changes, also follow the [HTTP verification skill](.agents/skills/verify/SKILL.md) to exercise the live router against a fake engine. Report what ran and any gaps; a unit test or `/health` response alone does not verify inference.
 
-The fork's `build-router.yml` runs the router suite on the upstream release tag plus replayed fork patches before publishing images. HTTP 200 from the published image's `/health` is required before promoting `latest`. The upstream PR, Helm, operator, and lint workflows were removed from this fork; run the relevant local checks before submitting changes. See the [release procedure](docs/fork-maintenance.md#patch-and-release-workflow) for triggers and tag behavior.
+The fork's `build-router.yml` runs the router suite on the upstream release tag plus the reconciled fork delta before publishing images. HTTP 200 from the published image's `/health` is required before promoting `latest`. The upstream PR, Helm, operator, and lint workflows were removed from this fork; run the relevant local checks before submitting changes. See the [release procedure](docs/fork-maintenance.md#patch-and-release-workflow) for triggers and tag behavior.
 
 ## Adding Examples and Tests
 
