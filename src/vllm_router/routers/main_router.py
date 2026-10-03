@@ -75,6 +75,11 @@ async def route_embeddings(request: Request, background_tasks: BackgroundTasks):
     return await route_general_request(request, "/v1/embeddings", background_tasks)
 
 
+@main_router.post("/pooling")
+async def route_pooling(request: Request, background_tasks: BackgroundTasks):
+    return await route_general_request(request, "/pooling", background_tasks)
+
+
 @main_router.post("/tokenize")
 async def route_tokenize(request: Request, background_tasks: BackgroundTasks):
     return await route_general_request(request, "/tokenize", background_tasks)
@@ -85,9 +90,60 @@ async def route_detokenize(request: Request, background_tasks: BackgroundTasks):
     return await route_general_request(request, "/detokenize", background_tasks)
 
 
+def apply_template(query: str, documents: list[str]) -> tuple[str, list[str]]:
+    instruction = (
+        "Given a web search query, retrieve relevant passages that answer the query"
+    )
+
+    prefix = '<|im_start|>system\\nJudge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be "yes" or "no".<|im_end|>\\n<|im_start|>user\\n'
+    suffix = "<|im_end|>\\n<|im_start|>assistant\\n<think>\\n\\n</think>\\n\\n"
+
+    query_template = "{prefix}<Instruct>: {instruction}\\n<Query>: {query}\\n"
+    document_template = "<Document>: {doc}{suffix}"
+
+    query = query_template.format(prefix=prefix, instruction=instruction, query=query)
+    documents = [document_template.format(doc=doc, suffix=suffix) for doc in documents]
+
+    return query, documents
+
+
 @main_router.post("/v1/rerank")
 async def route_v1_rerank(request: Request, background_tasks: BackgroundTasks):
-    return await route_general_request(request, "/v1/rerank", background_tasks)
+
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        payload = None
+    if not isinstance(payload, dict):
+        return await route_general_request(request, "/v1/rerank", background_tasks)
+
+    model = payload.get("model")
+    query = payload.get("query", "")
+    documents = payload.get("documents", "")
+
+    original_body = json.dumps(payload).encode("utf-8")
+
+    if model == "Qwen/Qwen3-Reranker-0.6B" and query and documents:
+        query, documents = apply_template(query, documents)
+        payload["query"] = query
+        payload["documents"] = documents
+        modified_body = json.dumps(payload).encode("utf-8")
+    else:
+        modified_body = original_body
+
+    new_scope = dict(request.scope)
+    raw_headers = [
+        (k, v) for k, v in new_scope["headers"] if k.lower() != b"content-length"
+    ]
+
+    raw_headers.append((b"content-length", str(len(modified_body)).encode("utf-8")))
+    new_scope["headers"] = raw_headers
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": modified_body, "more_body": False}
+
+    new_request = Request(new_scope, receive)
+    return await route_general_request(new_request, "/v1/rerank", background_tasks)
 
 
 @main_router.post("/rerank")
@@ -140,7 +196,8 @@ async def show_models(request: Request):
     Raises:
         Exception: If there is an error in retrieving the endpoint information.
     """
-    endpoints = get_service_discovery().get_endpoint_info()
+    service_discovery = get_service_discovery()
+    endpoints = service_discovery.get_endpoint_info()
     existing_models = set()
     model_cards = []
 
@@ -171,6 +228,23 @@ async def show_models(request: Request):
                 )
             )
             existing_models.add(model_id)
+
+    # Append static aliases so callers can discover the alternate model names
+    # they are allowed to request (aliases only exist on static discovery).
+    aliases = getattr(service_discovery, "aliases", None)
+    if aliases:
+        for alias, canonical_model in aliases.items():
+            if alias in existing_models:
+                continue
+            model_cards.append(
+                ModelCard(
+                    id=alias,
+                    object="model",
+                    owned_by="vllm",
+                    root=canonical_model,
+                )
+            )
+            existing_models.add(alias)
 
     model_list = ModelList(data=model_cards)
     return JSONResponse(content=model_list.model_dump())

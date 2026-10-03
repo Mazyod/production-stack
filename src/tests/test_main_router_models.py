@@ -28,6 +28,18 @@ def _build_endpoint(model_payload):
     )
 
 
+def _mock_service_discovery(endpoints, aliases=None):
+    """Build a service-discovery mock with explicit endpoints/aliases.
+
+    ``aliases`` is set explicitly (default ``None``) so ``getattr`` does not
+    resolve to an auto-generated MagicMock attribute.
+    """
+    return MagicMock(
+        get_endpoint_info=lambda: endpoints,
+        aliases=aliases,
+    )
+
+
 def test_model_info_preserves_extra_fields():
     payload = {
         "id": "test-model",
@@ -71,7 +83,7 @@ async def test_show_models_returns_full_backend_model_payload(monkeypatch):
 
     monkeypatch.setattr(
         "vllm_router.routers.main_router.get_service_discovery",
-        lambda: MagicMock(get_endpoint_info=lambda: [_build_endpoint(payload)]),
+        lambda: _mock_service_discovery([_build_endpoint(payload)]),
     )
 
     response = await show_models(_build_request())
@@ -79,6 +91,64 @@ async def test_show_models_returns_full_backend_model_payload(monkeypatch):
     assert response.status_code == 200
     body = json.loads(response.body)
     assert body["data"] == [payload]
+
+
+@pytest.mark.asyncio
+async def test_show_models_includes_static_aliases(monkeypatch):
+    payload = {
+        "id": "llama3",
+        "object": "model",
+        "created": 1774275193,
+        "owned_by": "vllm",
+        "root": None,
+        "parent": None,
+    }
+
+    monkeypatch.setattr(
+        "vllm_router.routers.main_router.get_service_discovery",
+        lambda: _mock_service_discovery(
+            [_build_endpoint(payload)],
+            aliases={"my-model": "llama3", "gpt-4": "llama3"},
+        ),
+    )
+
+    response = await show_models(_build_request())
+
+    assert response.status_code == 200
+    body = json.loads(response.body)
+    ids = [card["id"] for card in body["data"]]
+    assert ids == ["llama3", "my-model", "gpt-4"]
+
+    alias_card = next(card for card in body["data"] if card["id"] == "my-model")
+    assert alias_card["root"] == "llama3"
+    assert alias_card["owned_by"] == "vllm"
+
+
+@pytest.mark.asyncio
+async def test_show_models_alias_shadowed_by_real_model_is_not_duplicated(monkeypatch):
+    payload = {
+        "id": "llama3",
+        "object": "model",
+        "created": 1774275193,
+        "owned_by": "vllm",
+        "root": None,
+        "parent": None,
+    }
+
+    monkeypatch.setattr(
+        "vllm_router.routers.main_router.get_service_discovery",
+        # Alias key collides with an already-listed backend model id.
+        lambda: _mock_service_discovery(
+            [_build_endpoint(payload)],
+            aliases={"llama3": "llama3"},
+        ),
+    )
+
+    response = await show_models(_build_request())
+
+    assert response.status_code == 200
+    body = json.loads(response.body)
+    assert [card["id"] for card in body["data"]] == ["llama3"]
 
 
 @pytest.mark.asyncio
@@ -105,7 +175,7 @@ async def test_show_models_does_not_warn_for_preserved_backend_fields(
 
     monkeypatch.setattr(
         "vllm_router.routers.main_router.get_service_discovery",
-        lambda: MagicMock(get_endpoint_info=lambda: [_build_endpoint(payload)]),
+        lambda: _mock_service_discovery([_build_endpoint(payload)]),
     )
 
     with caplog.at_level(logging.WARNING, logger="vllm_router.protocols"):
