@@ -110,7 +110,12 @@ def apply_template(query: str, documents: list[str]) -> tuple[str, list[str]]:
 @main_router.post("/v1/rerank")
 async def route_v1_rerank(request: Request, background_tasks: BackgroundTasks):
 
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+        payload = None
+    if not isinstance(payload, dict):
+        return await route_general_request(request, "/v1/rerank", background_tasks)
 
     model = payload.get("model")
     query = payload.get("query", "")

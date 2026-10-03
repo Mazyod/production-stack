@@ -184,7 +184,6 @@ hashes. Evaluate it against the chosen release baseline; do not merge upstream
 main or publish again solely to clear that indicator. Documentation-only
 closeout commits after the release source do not change the published image.
 
-
 ## Upstream reconciliation — 2026-10-03
 
 At the user's request, the checkout includes upstream main through
