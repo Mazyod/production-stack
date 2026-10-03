@@ -1,3 +1,120 @@
+# vLLM Production Stack (fork)
+
+## About this fork
+
+This is a lightweight fork of [vllm-project/production-stack](https://github.com/vllm-project/production-stack) with the following changes:
+
+- **Multi-stage Docker build**: Builder stage installs dependencies with uv, runtime stage is just `python:3.13-slim` with the venv copied over. Image size reduced from ~5 GB to ~294 MB by defaulting `INSTALL_OPTIONAL_DEP` to empty (no PyTorch/sentence-transformers/vLLM).
+- **Python 3.13**: Both builder and runtime stages use Python 3.13.
+- **Single-label hostname fix**: `validate_url` regex accepts Docker/K8s hostnames without dots (e.g., `http://vllm-worker:8000`). Mirrors [PR #737](https://github.com/vllm-project/production-stack/pull/737).
+- **Qwen rerank template**: Preprocesses `/v1/rerank` requests for `Qwen/Qwen3-Reranker-0.6B` with the required chat template before forwarding to the backend. Malformed or non-object JSON uses upstream's shared 400 response contract.
+- **`/pooling` route**: Proxies vLLM's `/pooling` endpoint (backend chosen by the request body's `model` field, same as `/v1/embeddings`). Needed for Jina Embeddings v4 multi-vector (ColBERT) output, which vLLM serves only on `/pooling`.
+- **Default port 8080**: Changed from 8001 to match the [vllm-project/router](https://github.com/vllm-project/router) default for easier future migration.
+- **Keep-alive configuration**: `--timeout-keep-alive` (or `timeout_keep_alive` in YAML/JSON) controls uvicorn's idle connection timeout; the default is 5 seconds and changes require a restart.
+- **Model alias discovery**: `/v1/models` lists static aliases alongside canonical model names so clients can discover the names they may request.
+- **numpy unpinned**: `>=1.26.4` instead of `==1.26.4` (no Python 3.13 wheels for 1.26.4).
+- **Request-stats lifecycle fix**: In-flight counters no longer drift upward forever. `on_request_complete` sat outside a `finally`, so a client disconnect (`GeneratorExit`/`CancelledError` — both `BaseException`, so `except Exception` missed them) skipped the decrement and every abandoned request leaked its stage count for the life of the process; the per-request timestamp dicts were never popped even on success, growing without bound. `RequestStatsMonitor` now hands out an opaque per-attempt handle and exposes idempotent `on_request_complete` / `on_request_fail` / `on_request_abort`, retiring each attempt from the stage its own record says it is in. Backend sockets are bounded to match: `--backend-connect-timeout` (10 s) and `--backend-read-timeout` (300 s of silence, not of duration) stop a black-holed engine from hanging a request — and its counters — forever, and timeouts surface as structured **504/502** responses with an OpenAI-style error envelope (SSE streams get an in-band terminal error event) instead of bare 500s. See [Request-stats lifecycle](#request-stats-lifecycle) below.
+- **Multipart compatibility**: Includes upstream audio translation routing, text/SRT/VTT responses, and automatic transcription language detection. Priority and prefix routing also work with multipart requests. HTML backend error pages and malformed backend JSON still return 502, with the fork's lifecycle cleanup preserved.
+- **Dynamic-config file accepts all fork flags**: The `--dynamic-config-yaml` / `--dynamic-config-json` watcher used to reject any key that was not a hot-reloadable field, raising `TypeError` every 10 s and silently killing hot-reload of service discovery / routing. The fork's startup-only flags — the backend socket timeouts — therefore could not live in the config file you already pass, even though they load fine at startup. The watcher now tolerates non-reconfigurable keys: they are honored at startup and ignored (debug-logged) on reload, so you can keep all configuration in one file. See [Loading fork flags from the dynamic config file](#loading-fork-flags-from-the-dynamic-config-file) below.
+
+The checkout includes upstream `vllm-stack-0.1.13` and main through `014d070`
+(October 2, 2026), including [priority routing](tutorials/26-priority-routing.md),
+[load-aware routing](docs/source/use_cases/loadaware-routing.rst), discovery fixes,
+and Helm/operator improvements. This source update does not publish an image;
+the last verified fork image remains `v0.1.12`.
+
+Pre-built images are published to Docker Hub, tagged to match upstream releases:
+
+```console
+docker pull openimage/production-stack-router:v0.1.12
+```
+
+The release workflow applies the reconciled fork changes, including merge resolutions, onto an upstream release tag and runs the router regression suite before publishing versioned images. It requires HTTP 200 from the image's `/health` before promoting `latest`.
+
+For development, start with [AGENTS.md](AGENTS.md) and the [fork maintenance guide](docs/fork-maintenance.md), which records the release workflow and decisions shared by coding tools.
+
+### Audio-enabled vLLM serving image
+
+The stock `vllm/vllm-openai` image ships **without** the audio extras, so `POST /v1/audio/transcriptions` fails at request time with `ImportError: Please install vllm[audio] for audio support` (surfaced to clients as a generic `400 Invalid or unsupported audio file`). A drop-in replacement installs the vLLM `audio` extra (`av`, `soundfile`, `soxr`, `scipy`, … — the set tracks the vLLM version), pinned to the exact vLLM build in the base image so nothing else changes:
+
+```console
+docker pull openimage/vllm-openai-audio:v0.25.1
+```
+
+> **This image now lives in the vLLM engine fork, [`Mazyod/vllm`](https://github.com/Mazyod/vllm).** Everything about the vLLM **engine** was consolidated there; production-stack owns only the **router**. The fork layers the audio extra **and** a small series of upstream bugfix backports onto a pinned `vllm/vllm-openai` release — see its [`FORK.md`](https://github.com/Mazyod/vllm/blob/main/FORK.md). The image name, registry, and drop-in entrypoint are unchanged, so `openimage/vllm-openai-audio` stays the pull target and swapping the image keeps Whisper/transcription endpoints working.
+
+### Request-stats lifecycle
+
+`RequestStatsMonitor` tracks in-flight requests as per-engine counters split by stage: `on_new_request` increments `in_prefill_requests`, the first response token moves the count to `in_decoding_requests`, and completion retires it. At the original fork baseline, the completion hook sat outside a `finally`, so terminal paths other than a clean return skipped it. Upstream `0.1.13` now includes stage-aware cleanup, but the fork retains additional guarantees: independent attempt identities, explicit terminal outcomes, thread safety, and bounded backend silence.
+
+The counters are per-engine aggregates rather than per-request, so adding a `finally` alone is not sufficient and is actively harmful: retiring a request that never reached decoding decrements `in_decoding_requests` anyway, stealing the decrement owed to a *different* concurrent request while the aborted request's prefill count leaks regardless. The fork therefore preserves stage-aware finalization alongside the upstream cleanup fix.
+
+The monitor now issues an opaque handle per backend attempt. The external `X-Request-Id` is caller-controlled and two concurrent requests may share one, so it is retained as metadata only and never used as identity. Each attempt has one authoritative active record naming the stage it is in; the finalizer pops that record first and retires the attempt from its recorded stage, which makes repeated or unknown finalization a no-op. All state and snapshots are guarded by a `threading.RLock`, because `--log-stats` runs a real OS thread that reads the same sliding-window buffers the event loop mutates.
+
+Terminal outcomes are explicit: `on_request_complete` for normal backend exhaustion, `on_request_fail` for a backend or transport error, and `on_request_abort` for client disconnect or cancellation.
+
+Behavior changes worth noting:
+
+- `finished_requests` now counts normal exhaustion only. Aborted and failed attempts no longer increment it. A response whose body is read to completion counts as exhaustion even when its status is 4xx or 5xx.
+- Abandoned streams are recorded as `status="aborted"` in `vllm:request_latency_seconds`. They were previously recorded as `success`, because the status defaulted to success and cancellation bypassed the error handler.
+- A request body that is not JSON-parsable now returns 400. It previously raised `TypeError` and surfaced as a 500, because `HTTPException(status=...)` is an invalid keyword — the parameter is `status_code`.
+- Failed failover attempts now retire. Each attempt owns its own handle and finalizes in its own `finally`, so an attempt that fails against one engine no longer leaves a count behind on it.
+
+#### Backend socket timeouts
+
+The lifecycle fix guarantees that a terminating attempt retires its counters; socket timeouts guarantee that attempts terminate. Proxied backend requests previously used `ClientTimeout(total=None)` — no bound of any kind — so an engine that vanished without closing the connection (node death, TCP black hole, dropped SYNs) hung the request and its stage count forever, and the failover loop never ran because it only sees failures, not silence.
+
+Backend requests now default to `--backend-connect-timeout` 10 s and `--backend-read-timeout` 300 s (`0` disables either). `total` stays `None`: the read bound is on *silence*, not duration — it re-arms on every byte received, so a stream that keeps producing tokens can run for hours, and aiohttp suspends the watchdog while the router applies backpressure to a slow client, so a slow reader cannot trip it either. Every silent phase of an attempt is covered: DNS resolution and connection establishment by the connect bound (`ClientTimeout.connect` + `sock_connect`), the wait for response headers and gaps mid-stream by `sock_read`, and the request-body upload — where `sock_read` is not yet armed, so a backend that accepts the connection but stops reading would otherwise hang a large multimodal payload forever — by an entry deadline of connect + read (310 s by default) that is disarmed the moment response headers arrive.
+
+On breach, the client gets a structured answer instead of a bare 500 or a silent connection reset:
+
+- **Connect-phase failures** (`ConnectionTimeoutError`, connection refused) rotate to the next engine; when every permitted failover attempt has failed, the router returns **502** with an OpenAI-style envelope — `{"error": {"message": …, "type": "bad_gateway", "code": "backend_connect_error", "param": null}}`.
+- **Read/entry timeouts before response headers** return **504** immediately — `code` is `backend_read_timeout` (read gap or header wait) or `backend_entry_timeout` (connect + upload + header deadline), `type` is `gateway_timeout`, and the message carries the configured bound. They deliberately do **not** rotate backends: the stall is workload-shaped, and a retry would typically eat the same bound on the next engine, multiplying worst-case latency.
+- **Mid-stream stalls on SSE responses** (status already committed) end with an in-band terminal event — `data: {"error": {…, "code": "backend_stream_stall"}}` followed by `data: [DONE]` — and a clean close, mirroring the engine's own streaming error contract. Non-SSE bodies keep the abrupt close: a truncated body must not be dressed up as success.
+
+Every error response carries `X-Request-Id` and `Retry-After: 1`. Each timeout logs one structured `WARNING` (request id, backend, model, endpoint, elapsed, which bound fired) with no traceback, the counters retire through the ordinary `fail` path, and the error stays visible as `request_errors_total{error_type="ConnectionTimeoutError"|"SocketTimeoutError"|"TimeoutError"}`.
+
+The one behavior change: a non-streaming generation — headers arrive only when generation finishes — or a deeply queued request whose backend stays silent longer than 300 s is now terminated with the 504 above rather than waiting indefinitely. Raise `--backend-read-timeout` (or set `0`) if your workloads legitimately stay silent longer; prefer streaming for very long generations.
+
+Note that `vllm:num_requests_running` is exported by the router under the same metric name vLLM engines export natively. Dashboards and autoscaler queries should filter by `job` or component to avoid selecting the router-derived series. The stock autoscalers are unaffected: the router HPA scales on CPU, and the engine KEDA trigger uses `vllm:num_requests_waiting` from the engine scraper.
+
+### Loading fork flags from the dynamic config file
+
+If you launch the router with `--dynamic-config-yaml` (or `--dynamic-config-json`), that file is your single source of truth: you do not also need to spell the fork's flags out in the `command:` array. Every flag the router accepts — including the fork's startup-only ones below — can be set as a key in that file.
+
+The startup-only fork flags and their config keys:
+
+| Config key | Flag | Default |
+|---|---|---|
+| `backend_connect_timeout` | `--backend-connect-timeout` | `10.0` |
+| `backend_read_timeout` | `--backend-read-timeout` | `300.0` |
+| `timeout_keep_alive` | `--timeout-keep-alive` | `5` |
+
+Example:
+
+```yaml
+service_discovery: static
+routing_logic: roundrobin
+static_models:
+  my-model:
+    static_backends:
+      - http://vllm-worker:8000
+
+# Fork flags — same file, no command-line flags needed:
+backend_connect_timeout: 10.0
+backend_read_timeout: 300.0
+timeout_keep_alive: 5
+```
+
+Three things to know:
+
+- **Keys use underscores, not dashes.** The config key is `backend_read_timeout`, matching the flag's destination — not `backend-read-timeout`. A dashed key has no effect at startup and is rejected by the watcher on reload.
+- **These flags are read once, at startup.** Restart to change their effective values. Backend timeout edits are inert to the watcher (logged at `debug`). `timeout_keep_alive` is a legacy dataclass field: editing it triggers a reconfiguration but does not change uvicorn's keep-alive timeout. Only the hot-reloadable settings (`static_backends`, `routing_logic`, `callbacks`, …) take effect on a live edit; the watcher re-reads the file every 10 seconds.
+- **A key that is not a recognized flag is rejected, and your running config is kept.** If the watcher re-reads the file and finds a key that is neither a hot-reloadable field nor a known flag — almost always a typo (e.g. `callback` instead of `callbacks`) — it logs a warning and does **not** reconfigure, so the running configuration is preserved rather than silently reverting the mistyped field to its default. Fix the typo and the next reload applies cleanly.
+
+---
+
+<!-- markdownlint-disable-next-line MD025 -->
 # vLLM Production Stack: reference stack for production vLLM deployment
 
 | [**Blog**](https://lmcache.github.io) | [**Docs**](https://docs.vllm.ai/projects/production-stack) | [**Production-Stack Slack Channel**](https://communityinviter.com/apps/vllm-dev/join-vllm-developers-slack) | [**LMCache Slack**](https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-2viziwhue-5Amprc9k5hcIdXT7XevTaQ) | [**Interest Form**](https://forms.gle/mQfQDUXbKfp2St1z7) |

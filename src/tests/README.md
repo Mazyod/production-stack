@@ -1,5 +1,9 @@
 # Testing scripts
 
+For the ordinary router regression suite, follow the dependency-group setup in [CONTRIBUTING.md](../../CONTRIBUTING.md#code-quality-and-validation) and run `.venv/bin/python -m pytest src/tests -q` from the repository root. These tests require neither a GPU nor vLLM. Use the [verify skill](../../.agents/skills/verify/SKILL.md) for live router checks against a lightweight fake engine.
+
+The manual inference and performance scripts below have separate dependencies, including the OpenAI client and vLLM protocol types; they are not required for the ordinary suite.
+
 This folder contains the test-related scripts to test the performance and functionality of the stack. Currently, it includes:
 
 - `test-openai.py`: a basic test that sends a request to a URL by OpenAI API
