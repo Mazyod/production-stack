@@ -203,8 +203,10 @@ upstream statistics tests and replace that duplicate suite's obsolete API.
 Upstream audio fixes now support translation multipart bodies, non-JSON audio
 formats, and automatic language detection. Reconciliation also awaits priority
 routing and supplies an empty prompt for prefix routing of multipart requests.
-Valid text/SRT/VTT responses pass through unchanged; HTML backend error pages
-and malformed JSON retain the fork's structured 502 behavior. Raw-body reads
+The reranker wrapper delegates malformed or non-object JSON to upstream's
+shared validation while retaining its valid-request template bytes and callback
+ordering. Valid text/SRT/VTT responses pass through unchanged; HTML backend
+error pages and malformed backend JSON retain the fork's structured 502 behavior. Raw-body reads
 use the same completion/cancellation cleanup as JSON reads.
 
 Priority routing configuration works with the tolerant config watcher, including
@@ -217,3 +219,34 @@ adopts upstream FastAPI/aiohttp/Kubernetes constraints, and refreshes the lock
 including patched Starlette. Lightweight tests explicitly depend on `httpx`.
 Upstream Gatekeeper and gateway CI workflows remain disabled along with the
 previously removed upstream workflows; the fork owns its router image workflow.
+
+Verification of implementation source `8d177bc`: all 316 router/release tests
+passed on Python 3.13 both in the checkout with freshly resolved dependencies
+and in a clean 0.1.13 release reconstruction installed with `uv sync --locked`
+and the test/lint groups. Reconstruction differs from the checkout in exactly
+the five files belonging to the two post-tag upstream commits; router code,
+tests, dependency files, and Dockerfile match. Release-source regression tests
+cover merge-resolution preservation, future upstream changes, retained file
+deletions, and fatal content/missing-file conflicts. Independent review found
+no remaining blockers.
+
+Helm dependencies and lint passed. With Helm 3.22.0 and helm-unittest 1.1.2,
+143 of 145 chart tests passed. Two inherited assertions failed: the chat-template
+multiline comparison and invalid JSONPath syntax for RayCluster annotations.
+Direct `helm template` parsing verified the exact chat-template bytes and all
+three RayCluster annotation values. Chart source and tests remain identical to
+upstream main. Operator deployment checks passed (`go test ./internal/controller
+-run TestDeployment -count=1`); full Kubernetes/envtest and GPU inference were
+not run.
+
+The locally built linux/amd64 image from the reconstructed source passed HTTP
+checks against a fake engine: health, alias discovery, pooling, Qwen reranking,
+malformed completion/rerank bodies, priority forwarding, multipart translations
+and transcription auto-detection/text output, HTML 502s, failover exhaustion,
+YAML-driven 504s, terminal SSE errors, healthy streams beyond the read bound,
+duplicate request IDs with client disconnect, and counter cleanup. Watcher
+checks covered unchanged files, typo rejection, priority reload, and inert
+startup-only backend timeout edits. The image runs Python 3.13 and includes no
+PyTorch, vLLM, or sentence-transformers. Standard pre-commit hooks passed.
+ARM64 image execution was not tested. No image was published by this sync;
+the September release provenance above remains the last verified publication.
