@@ -19,7 +19,10 @@ import sentry_sdk
 import uvicorn
 from fastapi import FastAPI
 
-from vllm_router.aiohttp_client import AiohttpClientWrapper
+from vllm_router.aiohttp_client import (
+    AiohttpClientWrapper,
+    build_backend_client_timeout,
+)
 from vllm_router.dynamic_config import (
     DynamicRouterConfig,
     get_dynamic_config_watcher,
@@ -368,6 +371,9 @@ def initialize_all(app: FastAPI, args):
     app.state.request_stats_monitor = get_request_stats_monitor()
     app.state.router = get_routing_logic()
     app.state.request_rewriter = get_request_rewriter()
+    app.state.backend_client_timeout = build_backend_client_timeout(
+        args.backend_connect_timeout, args.backend_read_timeout
+    )
 
 
 app = FastAPI(lifespan=lifespan)
@@ -404,6 +410,7 @@ def main():
         "port": args.port,
         "log_level": args.log_level,
         "root_path": args.root_path,
+        "timeout_keep_alive": args.timeout_keep_alive,
     }
     if args.log_format == "json":
         # Map 'trace' to 'DEBUG' since TRACE is not a standard Python

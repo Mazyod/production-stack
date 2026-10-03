@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 import os
 import time
@@ -26,6 +27,10 @@ from fastapi import BackgroundTasks, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from requests import JSONDecodeError
 
+from vllm_router.aiohttp_client import (
+    DEFAULT_BACKEND_CLIENT_TIMEOUT,
+    backend_entry_deadline,
+)
 from vllm_router.log import init_logger
 from vllm_router.routers.routing_logic import (
     DisaggregatedPrefillOrchestratedRouter,
@@ -99,6 +104,92 @@ _HEADERS_TO_STRIP_FROM_RESPONSE = {
     "connection",
     "server",
 }
+
+# Connect-phase failures rotate to another backend; read/entry timeouts do
+# not (see route_general_request). ConnectionTimeoutError must be recognized
+# before the TimeoutError family: it subclasses it.
+_BACKEND_CONNECT_ERRORS = (aiohttp.ConnectionTimeoutError, aiohttp.ClientConnectorError)
+
+
+def _resolve_backend_client_timeout(request: Request) -> aiohttp.ClientTimeout:
+    return (
+        getattr(request.app.state, "backend_client_timeout", None)
+        or DEFAULT_BACKEND_CLIENT_TIMEOUT
+    )
+
+
+def _format_bound(seconds) -> str:
+    if isinstance(seconds, (int, float)) and seconds > 0:
+        return f"{seconds:g}s"
+    return "the configured bound"
+
+
+def _backend_error_response(
+    request_id: str, status_code: int, error_type: str, code: str, message: str
+) -> JSONResponse:
+    """OpenAI-style error envelope; X-Request-Id on every error response."""
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "message": message,
+                "type": error_type,
+                "code": code,
+                "param": None,
+            }
+        },
+        headers={"X-Request-Id": request_id, "Retry-After": "1"},
+    )
+
+
+def _pre_header_timeout_response(
+    request_id: str, client_timeout: aiohttp.ClientTimeout, error: BaseException
+) -> JSONResponse:
+    if isinstance(error, aiohttp.ServerTimeoutError):
+        code = "backend_read_timeout"
+        message = (
+            f"Upstream LLM backend timed out after "
+            f"{_format_bound(client_timeout.sock_read)} with no data received. "
+            "The request was not completed and may be safely retried."
+        )
+    else:
+        code = "backend_entry_timeout"
+        message = (
+            f"Upstream LLM backend timed out after "
+            f"{_format_bound(backend_entry_deadline(client_timeout))} before "
+            "returning response headers. The request was not completed and "
+            "may be safely retried."
+        )
+    return _backend_error_response(request_id, 504, "gateway_timeout", code, message)
+
+
+def _backend_connect_error_response(request_id: str) -> JSONResponse:
+    return _backend_error_response(
+        request_id,
+        502,
+        "bad_gateway",
+        "backend_connect_error",
+        "Could not establish a connection to the upstream LLM backend within "
+        "the permitted failover attempts. The request was not completed and "
+        "may be safely retried.",
+    )
+
+
+def _sse_stall_frames(client_timeout: aiohttp.ClientTimeout) -> tuple[bytes, bytes]:
+    payload = json.dumps(
+        {
+            "error": {
+                "message": (
+                    "Upstream backend stalled mid-stream (read gap exceeded "
+                    f"{_format_bound(client_timeout.sock_read)}). "
+                    "Partial output above is incomplete."
+                ),
+                "type": "gateway_timeout",
+                "code": "backend_stream_stall",
+            }
+        }
+    )
+    return f"data: {payload}\n\n".encode(), b"data: [DONE]\n\n"
 
 
 def _is_json_media_type(content_type: str) -> bool:
@@ -279,70 +370,85 @@ async def process_request(
 
     first_token = False
     total_len = 0
+    # Check if this is a streaming request and extract model name
+    try:
+        request_json = json.loads(body)
+        is_streaming = request_json.get("stream", False)
+        model_name = request_json.get("model", "unknown")
+    except (JSONDecodeError, UnicodeDecodeError, ValueError):
+        # If we can't parse the body as JSON, assume it's not streaming
+        raise HTTPException(
+            status_code=400, detail="Request body is not JSON parsable."
+        )
+
     start_time = time.time()
-    request.app.state.request_stats_monitor.on_new_request(
+    request_handle = request.app.state.request_stats_monitor.on_new_request(
         backend_url, request_id, start_time
     )
 
-    model_name = "unknown"
-    request_status = "error"
+    # Add streaming info to span after parsing
+    if span is not None:
+        span.set_attribute("vllm.is_streaming", is_streaming)
+
+    # Sanitize the request headers
+    headers = _build_backend_request_headers(request, request_id)
+
+    # Inject trace context into outgoing headers
+    if tracing_active:
+        inject_context(headers, span_context)
+
+    # For non-streaming requests, collect the full response to cache it properly
+    full_response = bytearray()
+    last_chunk = b""
+
+    request_status = "aborted"
+    terminal_outcome = "abort"
     http_status_code = None
 
+    client_timeout = _resolve_backend_client_timeout(request)
+    entry_timeout = None
+    headers_sent = False
+    backend_content_type = ""
     try:
-        # Check if this is a streaming request and extract model name
-        try:
-            request_json = json.loads(body)
-            is_streaming = request_json.get("stream", False)
-            model_name = request_json.get("model", "unknown")
-        except (JSONDecodeError, UnicodeDecodeError, ValueError):
-            # If we can't parse the body as JSON, assume it's not streaming
-            raise HTTPException(
-                status_code=400, detail="Request body is not JSON parsable."
-            )
+        # sock_read does not arm until the request body is fully written, so
+        # the entry deadline bounds connect + body upload + header wait; it is
+        # disarmed once headers arrive and sock_read takes over.
+        async with asyncio.timeout(
+            backend_entry_deadline(client_timeout)
+        ) as entry_timeout:
+            async with request.app.state.aiohttp_client_wrapper().request(
+                method=request.method,
+                url=backend_url + endpoint,
+                headers=headers,
+                data=body,
+                timeout=client_timeout,
+            ) as backend_response:
+                entry_timeout.reschedule(None)
+                http_status_code = backend_response.status
+                backend_content_type = backend_response.headers.get("content-type", "")
+                # Set response status on span if tracing
+                if span is not None:
+                    span.set_attribute("http.status_code", backend_response.status)
 
-        # Add streaming info to span after parsing
-        if span is not None:
-            span.set_attribute("vllm.is_streaming", is_streaming)
+                # Yield headers and status code first.
+                yield backend_response.headers, backend_response.status
+                headers_sent = True
+                # Stream response content.
+                async for chunk in backend_response.content.iter_any():
+                    last_chunk = chunk
+                    total_len += len(chunk)
+                    if not first_token:
+                        first_token = True
+                        request.app.state.request_stats_monitor.on_request_response(
+                            request_handle, time.time()
+                        )
+                    # For non-streaming requests, collect the full response
+                    if full_response is not None:
+                        full_response.extend(chunk)
+                    yield chunk
 
-        # Sanitize the request headers
-        headers = _build_backend_request_headers(request, request_id)
-
-        # Inject trace context into outgoing headers
-        if tracing_active:
-            inject_context(headers, span_context)
-
-        # For non-streaming requests, collect the full response to cache it properly
-        full_response = bytearray()
-
+        terminal_outcome = "complete"
         request_status = "success"
-
-        async with request.app.state.aiohttp_client_wrapper().request(
-            method=request.method,
-            url=backend_url + endpoint,
-            headers=headers,
-            data=body,
-            timeout=aiohttp.ClientTimeout(total=None),
-        ) as backend_response:
-            http_status_code = backend_response.status
-            # Set response status on span if tracing
-            if span is not None:
-                span.set_attribute("http.status_code", backend_response.status)
-
-            # Yield headers and status code first.
-            yield backend_response.headers, backend_response.status
-            # Stream response content.
-            async for chunk in backend_response.content.iter_any():
-                total_len += len(chunk)
-                if not first_token:
-                    first_token = True
-                    request.app.state.request_stats_monitor.on_request_response(
-                        backend_url, request_id, time.time()
-                    )
-                # For non-streaming requests, collect the full response
-                if full_response is not None:
-                    full_response.extend(chunk)
-                yield chunk
-
         if http_status_code is not None and http_status_code >= 400:
             request_status = "error"
 
@@ -365,7 +471,7 @@ async def process_request(
         # Store in semantic cache if applicable
         # Use the full response for non-streaming requests, or the last chunk for streaming
         if request.app.state.semantic_cache_available:
-            cache_chunk = bytes(full_response) if not is_streaming else chunk
+            cache_chunk = bytes(full_response) if not is_streaming else last_chunk
             await store_in_semantic_cache(
                 endpoint=endpoint, method=request.method, body=body, chunk=cache_chunk
             )
@@ -373,20 +479,63 @@ async def process_request(
             background_tasks.add_task(
                 request.app.state.callbacks.post_request, request, full_response
             )
+    except (GeneratorExit, asyncio.CancelledError) as e:
+        if entry_timeout is not None and entry_timeout.expired():
+            # Normally the deadline's CancelledError becomes TimeoutError at
+            # asyncio.timeout's __aexit__ and lands in `except Exception`
+            # below. This branch covers the race where expiry coincides with
+            # another cancellation: an expired timer is a backend failure,
+            # never a client abort.
+            request_status = "error"
+            terminal_outcome = "fail"
+            request_errors_total.labels(
+                server=backend_url, model=model_name, error_type="TimeoutError"
+            ).inc()
+            end_span(span, error=e) if tracing_active else None
+            raise
+        request_status = "aborted"
+        terminal_outcome = "abort"
+        raise
     except Exception as e:
         request_status = "error"
+        terminal_outcome = "fail"
         # Track other errors
         request_errors_total.labels(
             server=backend_url, model=model_name, error_type=type(e).__name__
         ).inc()
         end_span(span, error=e) if tracing_active else None
+        if headers_sent and isinstance(e, TimeoutError):
+            # Expected operational event, not a crash: one structured line,
+            # no traceback.
+            logger.warning(
+                "Backend stalled mid-stream: request_id=%s backend=%s model=%s "
+                "endpoint=%s elapsed=%.1fs bound=read",
+                request_id,
+                backend_url,
+                model_name,
+                endpoint,
+                time.time() - start_time,
+            )
+            if backend_content_type.lower().startswith("text/event-stream"):
+                # The status is already committed, so mirror the engine's own
+                # streaming contract: in-band terminal error event + [DONE],
+                # then a clean close. The attempt still retires as a failure,
+                # and the stashed exception lets the tracing wrapper end the
+                # router span as failed despite the clean exhaustion.
+                request.state.backend_stream_stall_error = e
+                error_frame, done_frame = _sse_stall_frames(client_timeout)
+                yield error_frame
+                yield done_frame
+                return
+            # Non-SSE: a truncated body must not be dressed up as success —
+            # keep the abrupt close.
         raise
     finally:
-        # In finally so backend-error and client-disconnect paths also release
-        # the in-flight slot; on_request_complete is idempotent.
-        request.app.state.request_stats_monitor.on_request_complete(
-            backend_url, request_id, time.time()
+        terminal_hook = getattr(
+            request.app.state.request_stats_monitor,
+            f"on_request_{terminal_outcome}",
         )
+        terminal_hook(request_handle, time.time())
         request_latency_seconds.labels(
             server=backend_url, model=model_name, status=request_status
         ).observe(time.time() - start_time)
@@ -657,6 +806,7 @@ async def route_general_request(
                 span.set_attribute("vllm.backend_url", server_url)
 
         media_type = "text/event-stream"
+        attempt_start = time.time()
         try:
             stream_generator = process_request(
                 request,
@@ -680,6 +830,45 @@ async def route_general_request(
             break
         except HTTPException:
             raise
+        except _BACKEND_CONNECT_ERRORS as e:
+            error_urls.add(server_url)
+            last_error = e
+            # One structured WARNING per timed-out attempt (the exhaustion
+            # branch below adds none): expected operational event, no
+            # traceback.
+            logger.warning(
+                "Backend connect failure: request_id=%s backend=%s model=%s "
+                "endpoint=%s elapsed=%.1fs bound=connect attempt=%d/%d: %s",
+                request_id,
+                server_url,
+                requested_model,
+                endpoint,
+                time.time() - attempt_start,
+                attempt + 1,
+                max_attempts,
+                e,
+            )
+        except (aiohttp.ServerTimeoutError, TimeoutError) as e:
+            # A read/entry timeout is workload-shaped, not backend-shaped:
+            # rotating would typically eat the same bound on the next engine,
+            # multiplying worst-case latency. Short-circuit to a structured
+            # 504 instead of burning a retry attempt. Expected operational
+            # event: one structured line, no traceback.
+            bound = "read" if isinstance(e, aiohttp.ServerTimeoutError) else "entry"
+            logger.warning(
+                "Backend timeout: request_id=%s backend=%s model=%s "
+                "endpoint=%s elapsed=%.1fs bound=%s — returning 504",
+                request_id,
+                server_url,
+                requested_model,
+                endpoint,
+                time.time() - attempt_start,
+                bound,
+            )
+            end_span(span, error=e, status_code=504) if tracing_active else None
+            return _pre_header_timeout_response(
+                request_id, _resolve_backend_client_timeout(request), e
+            )
         except Exception as e:
             error_urls.add(server_url)
             last_error = e
@@ -689,6 +878,13 @@ async def route_general_request(
             )
 
     if last_error:
+        if isinstance(last_error, _BACKEND_CONNECT_ERRORS):
+            (
+                end_span(span, error=last_error, status_code=502)
+                if tracing_active
+                else None
+            )
+            return _backend_connect_error_response(request_id)
         end_span(span, error=last_error, status_code=500) if tracing_active else None
         raise last_error
 
@@ -697,10 +893,24 @@ async def route_general_request(
         try:
             async for chunk in stream_generator:
                 yield chunk
-            end_span(span, status_code=status) if tracing_active else None
-        except Exception as e:
-            end_span(span, error=e, status_code=500) if tracing_active else None
+            if tracing_active:
+                stall_error = getattr(request.state, "backend_stream_stall_error", None)
+                if isinstance(stall_error, Exception):
+                    end_span(span, error=stall_error, status_code=status)
+                else:
+                    end_span(span, status_code=status)
+        except BaseException as e:
+            if tracing_active:
+                if isinstance(e, Exception):
+                    end_span(span, error=e, status_code=500)
+                else:
+                    end_span(span, status_code=499)
             raise
+        finally:
+            try:
+                await stream_generator.aclose()
+            except BaseException:
+                pass
 
     return StreamingResponse(
         traced_stream(),
@@ -1299,6 +1509,7 @@ async def proxy_multipart_request(
             KvawareRouter,
             PrefixAwareRouter,
             SessionRouter,
+            PriorityRouter,
             DisaggregatedPrefillOrchestratedRouter,
         ),
     ):
@@ -1307,7 +1518,7 @@ async def proxy_multipart_request(
             engine_stats,
             request_stats,
             request,
-            {},  # no JSON body for multipart/form-data
+            {"model": model, "prompt": ""},  # no text prefix for multipart routing
         )
     elif isinstance(router, DisaggregatedPrefillRouter):
         chosen_url = router.route_request(
@@ -1336,7 +1547,9 @@ async def proxy_multipart_request(
             include_content_type=isinstance(form_data, bytes),
         )
 
-        request_stats_monitor.on_new_request(chosen_url, request_id, time.time())
+        request_handle = request_stats_monitor.on_new_request(
+            chosen_url, request_id, time.time()
+        )
 
         try:
             backend_response = await client.post(
@@ -1345,71 +1558,96 @@ async def proxy_multipart_request(
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=300),
             )
+        except (GeneratorExit, asyncio.CancelledError):
+            request_stats_monitor.on_request_abort(request_handle, time.time())
+            raise
         except Exception:
-            request_stats_monitor.on_request_complete(
-                chosen_url, request_id, time.time()
-            )
+            request_stats_monitor.on_request_fail(request_handle, time.time())
             raise
 
-        resp_headers = {
-            k: v
-            for k, v in backend_response.headers.items()
-            if k.lower() not in _HEADERS_TO_STRIP_FROM_RESPONSE
-        }
-        resp_headers["X-Request-Id"] = request_id
-
-        if stream:
-
-            async def traced_stream():
-                first_token = False
-                try:
-                    async for chunk in backend_response.content.iter_any():
-                        if not first_token:
-                            first_token = True
-                            request_stats_monitor.on_request_response(
-                                chosen_url, request_id, time.time()
-                            )
-                        if chunk:
-                            yield chunk
-                finally:
-                    backend_response.close()
-                    request_stats_monitor.on_request_complete(
-                        chosen_url, request_id, time.time()
-                    )
-
-            return StreamingResponse(
-                traced_stream(),
-                status_code=backend_response.status,
-                headers=resp_headers,
-                media_type=backend_response.headers.get(
-                    "content-type", "text/event-stream"
-                ),
-            )
-
         try:
-            request_stats_monitor.on_request_response(
-                chosen_url, request_id, time.time()
-            )
-            if not _is_json_media_type(
-                backend_response.headers.get("content-type", "")
-            ):
-                return Response(
+            resp_headers = {
+                k: v
+                for k, v in backend_response.headers.items()
+                if k.lower() not in _HEADERS_TO_STRIP_FROM_RESPONSE
+            }
+            resp_headers["X-Request-Id"] = request_id
+
+            if stream:
+
+                async def traced_stream():
+                    first_token = False
+                    outcome = "abort"
+                    try:
+                        async for chunk in backend_response.content.iter_any():
+                            if chunk and not first_token:
+                                first_token = True
+                                request_stats_monitor.on_request_response(
+                                    request_handle, time.time()
+                                )
+                            if chunk:
+                                yield chunk
+                        outcome = "complete"
+                    except (GeneratorExit, asyncio.CancelledError):
+                        outcome = "abort"
+                        raise
+                    except Exception:
+                        outcome = "fail"
+                        raise
+                    finally:
+                        backend_response.close()
+                        terminal_hook = getattr(
+                            request_stats_monitor, f"on_request_{outcome}"
+                        )
+                        terminal_hook(request_handle, time.time())
+
+                return StreamingResponse(
+                    traced_stream(),
+                    status_code=backend_response.status,
+                    headers=resp_headers,
+                    media_type=backend_response.headers.get(
+                        "content-type", "text/event-stream"
+                    ),
+                )
+        except (GeneratorExit, asyncio.CancelledError):
+            try:
+                backend_response.close()
+            finally:
+                request_stats_monitor.on_request_abort(request_handle, time.time())
+            raise
+        except Exception:
+            try:
+                backend_response.close()
+            finally:
+                request_stats_monitor.on_request_fail(request_handle, time.time())
+            raise
+
+        outcome = "abort"
+        try:
+            request_stats_monitor.on_request_response(request_handle, time.time())
+            content_type = backend_response.headers.get("content-type", "")
+            media_type = content_type.partition(";")[0].strip().lower()
+            # Audio formats such as text/SRT/VTT are valid opaque responses.
+            # Keep the fork's 502 contract for HTML backend error pages.
+            if not _is_json_media_type(content_type) and media_type != "text/html":
+                response = Response(
                     content=await backend_response.read(),
                     status_code=backend_response.status,
                     headers=resp_headers,
                 )
-
-            response_content = await backend_response.json()
-            return JSONResponse(
-                content=response_content,
-                status_code=backend_response.status,
-                headers=resp_headers,
-            )
+            else:
+                response_content = await backend_response.json()
+                response = JSONResponse(
+                    content=response_content,
+                    status_code=backend_response.status,
+                    headers=resp_headers,
+                )
         except (aiohttp.ContentTypeError, json.JSONDecodeError) as parse_error:
             try:
                 text_content = await backend_response.text()
             except aiohttp.ClientError:
                 text_content = str(parse_error)
+            outcome = "complete"
             return JSONResponse(
                 status_code=502,
                 content={
@@ -1417,11 +1655,21 @@ async def proxy_multipart_request(
                 },
                 headers=resp_headers,
             )
+        except (GeneratorExit, asyncio.CancelledError):
+            outcome = "abort"
+            raise
+        except Exception:
+            outcome = "fail"
+            raise
+        else:
+            outcome = "complete"
+            return response
         finally:
-            backend_response.close()
-            request_stats_monitor.on_request_complete(
-                chosen_url, request_id, time.time()
-            )
+            try:
+                backend_response.close()
+            finally:
+                terminal_hook = getattr(request_stats_monitor, f"on_request_{outcome}")
+                terminal_hook(request_handle, time.time())
     except aiohttp.ClientResponseError as response_error:
         if response_error.response is not None:
             try:

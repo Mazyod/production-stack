@@ -28,6 +28,7 @@ from vllm_router.stats.request_stats import (
 )
 from vllm_router.stats.request_stats import SingletonMeta as RequestStatsSingletonMeta
 from vllm_router.stats.request_stats import (
+    get_request_stats_monitor,
     initialize_request_stats_monitor,
 )
 from vllm_router.utils import SingletonMeta
@@ -51,7 +52,9 @@ async def multipart_backend(endpoint, handler):
 
 
 @asynccontextmanager
-async def router_client(backend_url, model=AUDIO_MODEL):
+async def router_client(
+    backend_url, model=AUDIO_MODEL, routing_logic=RoutingLogic.ROUND_ROBIN
+):
     app = FastAPI()
     app.include_router(main_router)
 
@@ -77,7 +80,8 @@ async def router_client(backend_url, model=AUDIO_MODEL):
         )
 
         router = initialize_routing_logic(
-            RoutingLogic.ROUND_ROBIN,
+            routing_logic,
+            session_key="x-session-id",
             max_instance_failover_reroute_attempts=0,
         )
         stack.callback(cleanup_routing_logic)
@@ -133,7 +137,10 @@ async def test_audio_translation_accepts_standard_multipart_request():
 
 
 @pytest.mark.asyncio
-async def test_audio_translation_preserves_plain_text_response():
+@pytest.mark.parametrize(
+    "routing_logic", ["roundrobin", "session", "prefixaware", "priority"]
+)
+async def test_audio_translation_preserves_plain_text_response(routing_logic):
     received = {}
 
     async def translate(request):
@@ -142,12 +149,16 @@ async def test_audio_translation_preserves_plain_text_response():
         return web.Response(text="translated text", content_type="text/plain")
 
     async with multipart_backend("/v1/audio/translations", translate) as backend_url:
-        async with router_client(backend_url) as client:
+        async with router_client(backend_url, routing_logic=routing_logic) as client:
             response = await client.post(
                 "/v1/audio/translations",
                 data={"model": AUDIO_MODEL, "response_format": "text"},
                 files={"file": ("speech.wav", b"fake-audio", "audio/wav")},
+                headers={"x-request-priority": "-1", "x-session-id": "audio"},
             )
+            stats = get_request_stats_monitor().get_request_stats(0)[backend_url]
+            assert stats.in_prefill_requests == stats.in_decoding_requests == 0
+            assert stats.finished_requests == 1
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")

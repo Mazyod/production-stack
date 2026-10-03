@@ -16,6 +16,10 @@ import json
 import sys
 
 from vllm_router import utils
+from vllm_router.aiohttp_client import (
+    DEFAULT_BACKEND_CONNECT_TIMEOUT,
+    DEFAULT_BACKEND_READ_TIMEOUT,
+)
 from vllm_router.log import init_logger
 from vllm_router.parsers.yaml_utils import (
     read_and_process_yaml_config_file,
@@ -122,19 +126,62 @@ def validate_args(args):
         )
 
 
-def parse_args():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the FastAPI app.")
     parser.add_argument(
         "--host", type=str, default="0.0.0.0", help="The host to run the server on."
     )
     parser.add_argument(
-        "--port", type=int, default=8001, help="The port to run the server on."
+        "--port", type=int, default=8080, help="The port to run the server on."
     )
     parser.add_argument(
         "--root-path",
         type=str,
         default="",
         help="FastAPI root path for hosting under a subpath (e.g. /vllm).",
+    )
+    parser.add_argument(
+        "--timeout-keep-alive",
+        type=int,
+        default=5,
+        help="Seconds to keep an idle HTTP keep-alive connection open before "
+        "the server closes it (passed through to uvicorn). Raise this above "
+        "the connection-reuse window of whatever sits in front of the router "
+        "(e.g. a Caddy/nginx reverse proxy, whose upstream keep-alive is "
+        "often 1-2 minutes) so the front end does not reuse a connection the "
+        "router has already closed, which surfaces as a slow/failed first "
+        "request after a few seconds of idle. Default is 5 (uvicorn's "
+        "default); set 0 to disable the timeout.",
+    )
+    parser.add_argument(
+        "--backend-connect-timeout",
+        type=float,
+        default=DEFAULT_BACKEND_CONNECT_TIMEOUT,
+        help="Seconds allowed to establish a new connection to a backend "
+        "(DNS resolution included) before the attempt fails; the failover "
+        "loop then tries the next engine, and exhausting every engine "
+        "returns a structured 502 (code backend_connect_error). Without it, "
+        "a black-holed backend (dead node, dropped SYNs) hangs the request "
+        "forever and failover never runs. Applies only to new connections, "
+        "not pooled ones. Set 0 to disable. Default is "
+        f"{DEFAULT_BACKEND_CONNECT_TIMEOUT:g}.",
+    )
+    parser.add_argument(
+        "--backend-read-timeout",
+        type=float,
+        default=DEFAULT_BACKEND_READ_TIMEOUT,
+        help="Max seconds of backend silence — no bytes received, including "
+        "the wait for response headers and the request-body upload — before "
+        "the request fails. The timer re-arms on every byte, so a stream "
+        "that keeps producing is never affected and total duration stays "
+        "unbounded; but a non-streaming generation or a queued request that "
+        "stays silent longer than this is terminated with a structured 504 "
+        "(code backend_read_timeout / backend_entry_timeout) without "
+        "rotating backends — the stall is workload-shaped, so a retry "
+        "would eat the same bound again. Mid-stream SSE stalls end with an "
+        "in-band error event plus data: [DONE]. Raise it or set 0 to "
+        "disable if requests legitimately stay silent longer. Default is "
+        f"{DEFAULT_BACKEND_READ_TIMEOUT:g}.",
     )
     parser.add_argument(
         "--service-discovery",
@@ -536,6 +583,11 @@ def parse_args():
         help="Path to a YAML file defining external LLM provider configurations (startup-time only).",
     )
 
+    return parser
+
+
+def parse_args():
+    parser = build_parser()
     args = parser.parse_args()
     args = load_initial_config_from_config_file_if_required(parser, args)
 

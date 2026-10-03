@@ -20,7 +20,10 @@ The router can be configured using command-line arguments. Below are the availab
 ### Basic Options
 
 - `--host`: The host to run the server on. Default is `0.0.0.0`.
-- `--port`: The port to run the server on. Default is `8001`.
+- `--port`: The port to run the server on. Default is `8080`.
+- `--timeout-keep-alive`: Idle keep-alive connection timeout in seconds. Default is `5`. Set `timeout_keep_alive` in YAML/JSON; changing it requires a restart.
+
+For the fork's backend timeout flags and client-visible error behavior, see the [fork operator documentation](../../README.md#backend-socket-timeouts).
 
 ### Service Discovery Options
 
