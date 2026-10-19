@@ -29,6 +29,7 @@ from requests import JSONDecodeError
 
 from vllm_router.aiohttp_client import (
     DEFAULT_BACKEND_CLIENT_TIMEOUT,
+    backend_connector,
     backend_entry_deadline,
 )
 from vllm_router.log import init_logger
@@ -1320,7 +1321,7 @@ async def route_sleep_wakeup_request(
     # consumed above to pick the target engine.
     upstream_params = {k: v for k, v in request.query_params.items() if k != "id"}
 
-    async with aiohttp.ClientSession() as client:
+    async with aiohttp.ClientSession(connector=backend_connector()) as client:
         if endpoint == "/is_sleeping":
             async with client.get(
                 url, headers=headers, params=upstream_params

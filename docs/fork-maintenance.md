@@ -139,6 +139,53 @@ obsolete execution-environment restrictions. Local dashboards may also still
 reference its deleted metrics. They are historical artifacts, not current
 requirements or evidence that the feature is available.
 
+### Backend DNS resolution — October 2026
+
+Backend sessions resolve names with `aiohttp.ThreadedResolver` through
+`backend_connector()` in `aiohttp_client.py`. `aiohttp[speedups]` installs
+aiodns, making c-ares aiohttp's default resolver. Since c-ares 1.31 its query
+cache is on by default, capped at 3600 s, and pycares 5 does not expose the cap
+([pycares#330](https://github.com/saghul/pycares/pull/330) is open). It caches
+NXDOMAIN for min(SOA TTL, SOA MINIMUM) and NODATA for the full cap
+([c-ares#1293](https://github.com/c-ares/c-ares/issues/1293)). aiohttp shares
+one channel per event loop, so new sessions do not clear it; only a restart
+does. A backend name that failed once therefore kept returning 502
+`backend_connect_error` for the rest of the cached entry, up to an hour.
+
+Long negative TTLs arise when Docker's embedded DNS forwards an unknown
+single-label name upstream and receives NXDOMAIN with the root SOA (86400 s).
+A systemd-resolved upstream answers SERVFAIL, which is not cached. Default
+Kubernetes CoreDNS caps negative TTLs at 30 s or less, so it would only expose
+the hour through a NODATA answer. Glibc `getaddrinfo` in the slim image has no
+cache (no nscd), and aiohttp still caches successes for its 10 s
+`ttl_dns_cache`. This also stops c-ares from keeping a recreated Docker
+container's old address for the 600 s record TTL. The fix removes only the
+router's own c-ares cache. Negative caches in CoreDNS, systemd-resolved, NSS, or
+other upstream resolvers still apply.
+
+Rejected alternatives: dropping the `speedups` extra would also drop Brotli and
+zstd decoding, conflict with every upstream aiohttp bump, and regress silently
+if aiodns returned as a transitive dependency. Neither resolv.conf options nor
+`RES_OPTIONS` can disable the cache. External OpenAI-compatible providers also
+use the connector because `api_base` may name a private service. Pod-IP
+disaggregated-prefill sessions keep aiohttp's default because their URLs are IP
+literals, which aiohttp does not resolve. A system lookup cannot be cancelled:
+during a DNS outage, a lookup that has timed out keeps an executor thread busy
+until glibc gives up. This can also delay shutdown. Under uvloop, `getaddrinfo`
+runs in libuv's shared thread pool rather than Python's executor; that path was
+not tested.
+
+Evidence: `test_backend_client_resolves_again_after_a_failed_lookup` checks the
+system-resolver path. It patches `socket.getaddrinfo` to fail and then succeed,
+and expects the shared client to reach a local server on the second request. The
+old code failed this test because c-ares never consulted the patched function.
+The test does not reproduce the c-ares cache itself. That evidence came from a
+live router behind a fake DNS server that returned NXDOMAIN with SOA TTL and
+MINIMUM of 3600 s. Before the fix, the router still returned 502 15 s after the
+name started resolving, and c-ares sent no new query. A control with an SOA
+MINIMUM of 5 s recovered. After the fix, the router queried DNS again and
+returned 200.
+
 ## Verification and maintaining context
 
 Follow [CONTRIBUTING.md](../CONTRIBUTING.md#code-quality-and-validation) for setup,

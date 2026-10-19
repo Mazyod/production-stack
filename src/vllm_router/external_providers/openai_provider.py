@@ -2,6 +2,7 @@ from typing import AsyncIterator
 
 import aiohttp
 
+from vllm_router.aiohttp_client import backend_connector
 from vllm_router.external_providers.base import (
     ExternalProviderAdapter,
     ExternalProviderResponse,
@@ -36,7 +37,8 @@ class OpenAIProvider(ExternalProviderAdapter):
                 timeout=aiohttp.ClientTimeout(
                     connect=self.config.timeout,
                     sock_read=self.config.timeout,
-                )
+                ),
+                connector=backend_connector(),
             )
         return self._session
 

@@ -27,6 +27,7 @@ import requests
 from kubernetes import client, config, watch
 
 from vllm_router import utils
+from vllm_router.aiohttp_client import backend_connector
 from vllm_router.log import init_logger
 
 logger = init_logger(__name__)
@@ -358,11 +359,13 @@ class StaticServiceDiscovery(ServiceDiscovery):
                     self.app.state.prefill_client = aiohttp.ClientSession(
                         base_url=endpoint_info.url,
                         timeout=aiohttp.ClientTimeout(total=None),
+                        connector=backend_connector(),
                     )
                 elif endpoint_info.model_label in self.decode_model_labels:
                     self.app.state.decode_client = aiohttp.ClientSession(
                         base_url=endpoint_info.url,
                         timeout=aiohttp.ClientTimeout(total=None),
+                        connector=backend_connector(),
                     )
 
     def has_ever_seen_model(self, model_name: str) -> bool:
@@ -1318,11 +1321,13 @@ class K8sServiceNameServiceDiscovery(ServiceDiscovery):
                     self.app.state.prefill_client = aiohttp.ClientSession(
                         base_url=endpoint_info.url,
                         timeout=aiohttp.ClientTimeout(total=None),
+                        connector=backend_connector(),
                     )
                 elif endpoint_info.model_label in self.decode_model_labels:
                     self.app.state.decode_client = aiohttp.ClientSession(
                         base_url=endpoint_info.url,
                         timeout=aiohttp.ClientTimeout(total=None),
+                        connector=backend_connector(),
                     )
 
 

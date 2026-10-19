@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional
+from typing import Any, Optional
 
 import aiohttp
 
@@ -70,6 +70,20 @@ DEFAULT_BACKEND_CLIENT_TIMEOUT = build_backend_client_timeout(
 )
 
 
+def backend_connector(**kwargs: Any) -> aiohttp.TCPConnector:
+    """TCPConnector that resolves backend names with system getaddrinfo.
+
+    aiohttp[speedups] installs aiodns, which makes c-ares aiohttp's default
+    resolver. c-ares adds its own query cache that keeps failed lookups for up
+    to an hour (NXDOMAIN for the SOA negative TTL, NODATA for the full hour),
+    so a backend created after the router first looked it up kept failing with
+    502 long after DNS answered. getaddrinfo skips that extra cache; caches in
+    the system or upstream resolvers still apply, and aiohttp still caches
+    successful lookups for ttl_dns_cache (10 s).
+    """
+    return aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver(), **kwargs)
+
+
 class AiohttpClientWrapper:
 
     async_client = None
@@ -78,9 +92,8 @@ class AiohttpClientWrapper:
         """Instantiate the client. Call from the FastAPI startup hook."""
         # To fully leverage the router's concurrency capabilities,
         # we set the maximum number of connections to be unlimited.
-        connector = aiohttp.TCPConnector(limit=0)
         self.async_client = aiohttp.ClientSession(
-            connector=connector, connector_owner=True
+            connector=backend_connector(limit=0), connector_owner=True
         )
         logger.info(f"aiohttp ClientSession instantiated. Id {id(self.async_client)}")
 
