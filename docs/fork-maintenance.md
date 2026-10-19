@@ -348,3 +348,29 @@ tested. The two inherited Helm assertion failures recorded above remain.
 
 The subsequent README and maintenance closeout changes only document this
 publication; they do not change the image source or trigger another release.
+
+## Authorized release — 2026-10-19
+
+The user authorized fixing and pushing the backend DNS recovery patch.
+Release source `a03970c576aba8790fcf9afbc8102860abcb86eb` was pushed to main.
+[Release run 39312035697](https://github.com/Mazyod/production-stack/actions/runs/39312035697)
+succeeded using upstream `vllm-stack-0.1.13`
+(`e8cb4959ebfa333714ef468a3aefe158a65a09e6`), still the newest upstream tag. CI
+reconstructed tree `03bd025dcaf6a499cf72d8aa63b64c3658818dd5`, identical to the
+local clean-clone reconstruction. It differs from the source only in the five
+files of the two post-tag upstream commits. All 317 tests passed in CI and on
+the reconstruction, with both locked and freshly resolved dependencies. The
+image resolves dependencies fresh, so it ships pycares 5.2.0 instead of the
+locked 5.0.1.
+
+Tags `v0.1.13`, `vllm-stack-0.1.13`, and `latest` resolve to
+`sha256:ff1ffaf961d65aee0392b62d0cc9de3ede105edd57d8f90c5d0e7e61de2b0ab3`
+(linux/amd64 `sha256:a4ce7d947f6581c2c832f78e40cbcfac08b4af300fd4e40f43375e41b2dc5f48`).
+The workflow got HTTP 200 from `/health` before promoting latest. The fake-DNS
+reproduction was run against the digest-pinned amd64 image. It returned 502
+while the name was missing, queried DNS again once the name resolved, and then
+returned 200. The previous amd64 image
+(`sha256:0539b9209b5e16a25637830c2a6d99e4f5be392c9439bf2e40a7ca782d6a5bc5`)
+still returned 502 and sent no new query. The image contains no uvloop. ARM64
+execution, real Kubernetes DNS, and GPU inference were not tested. Running
+routers keep the cached failure until they are restarted with the new image.

@@ -23,7 +23,7 @@ The checkout includes upstream `vllm-stack-0.1.13` and main through `014d070`
 [load-aware routing](docs/source/use_cases/loadaware-routing.rst), discovery fixes,
 and Helm/operator improvements. The verified fork image is `v0.1.13`, built from
 the upstream release tag plus fork patches; the checkout also includes two
-post-tag upstream commits. See the [release provenance](docs/fork-maintenance.md#authorized-release--2026-10-03).
+post-tag upstream commits. See the [release provenance](docs/fork-maintenance.md#authorized-release--2026-10-19).
 
 Pre-built images are published to Docker Hub, tagged to match upstream releases:
 
