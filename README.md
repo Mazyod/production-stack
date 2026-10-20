@@ -6,7 +6,7 @@ This is a lightweight fork of [vllm-project/production-stack](https://github.com
 
 - **Multi-stage Docker build**: Builder stage installs dependencies with uv, runtime stage is just `python:3.13-slim` with the venv copied over. Image size reduced from ~5 GB to ~294 MB by defaulting `INSTALL_OPTIONAL_DEP` to empty (no PyTorch/sentence-transformers/vLLM).
 - **Python 3.13**: Both builder and runtime stages use Python 3.13.
-- **Single-label hostname fix**: `validate_url` regex accepts Docker/K8s hostnames without dots (e.g., `http://vllm-worker:8000`). Mirrors [PR #737](https://github.com/vllm-project/production-stack/pull/737).
+- **Single-label hostname fix**: `validate_url` regex accepts Docker/K8s hostnames without dots (e.g., `http://vllm-worker:8000`). Upstream fix pending in [PR #1154](https://github.com/vllm-project/production-stack/pull/1154), which supersedes the closed #737.
 - **Qwen rerank template**: Preprocesses `/v1/rerank` requests for `Qwen/Qwen3-Reranker-0.6B` with the required chat template before forwarding to the backend. Malformed or non-object JSON uses upstream's shared 400 response contract.
 - **`/pooling` route**: Proxies vLLM's `/pooling` endpoint (backend chosen by the request body's `model` field, same as `/v1/embeddings`). Needed for Jina Embeddings v4 multi-vector (ColBERT) output, which vLLM serves only on `/pooling`.
 - **Default port 8080**: Changed from 8001 to match the [vllm-project/router](https://github.com/vllm-project/router) default for easier future migration.

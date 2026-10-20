@@ -186,6 +186,27 @@ name started resolving, and c-ares sent no new query. A control with an SOA
 MINIMUM of 5 s recovered. After the fix, the router queried DNS again and
 returned 200.
 
+Upstream: [#1161](https://github.com/vllm-project/production-stack/issues/1161)
+and [PR #1162](https://github.com/vllm-project/production-stack/pull/1162)
+propose the resolver change for the shared client only. If it merges, keep the
+fork's other call sites until upstream covers them.
+[PR #1164](https://github.com/vllm-project/production-stack/pull/1164) proposes
+upstream's existing multipart 503 for the case where failover ends on a client
+error. The fork's documented 502 `backend_connect_error` envelope takes
+precedence, so resolve that conflict in the fork's favor when refreshing.
+
+### Upstream contributions — October 2026
+
+Post as GitHub user `Mazyod` with a matching DCO `Signed-off-by`. Branch from
+`upstream/main` and push topic branches, never `main`, to `origin`. Upstream
+merges small `[Bugfix][Router]` PRs that link an issue, include a test, and
+change no defaults. Effectively one maintainer, `ruizhang0101`, reviews and
+merges; CI for first-time contributors waits for that maintainer's approval.
+Answer every gemini-code-assist comment before asking for review. After 3–5
+quiet days, follow up with a single mention. Keep at most two PRs open, and
+start features with an issue or proposal. The patch index records which fork
+patches are pending upstream.
+
 ## Verification and maintaining context
 
 Follow [CONTRIBUTING.md](../CONTRIBUTING.md#code-quality-and-validation) for setup,
