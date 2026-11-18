@@ -269,3 +269,26 @@ def test_reconfigure_routing_logic_keeps_prefill_decode_labels(
     router = watcher.app.state.router
     assert router.prefill_model_labels == ["prefill-a", "prefill-b"]
     assert router.decode_model_labels == ["decode"]
+
+
+def test_reload_static_yaml_without_model_types(tmp_path, monkeypatch):
+    from vllm_router import service_discovery
+
+    path = tmp_path / "router.yaml"
+    urls = ["http://engine-a:8000", "http://engine-b:8000"]
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "service_discovery": "static",
+                "routing_logic": "roundrobin",
+                "static_models": {"model": {"static_backends": urls}},
+            }
+        )
+    )
+    monkeypatch.setattr(service_discovery, "_global_service_discovery", MagicMock())
+    DynamicConfigWatcher.reconfigure_service_discovery(
+        SimpleNamespace(app=MagicMock()), DynamicRouterConfig.from_yaml(path)
+    )
+
+    endpoints = service_discovery.get_service_discovery().get_endpoint_info()
+    assert [endpoint.url for endpoint in endpoints] == urls

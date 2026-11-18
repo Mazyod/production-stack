@@ -259,8 +259,12 @@ class DynamicConfigWatcher(metaclass=SingletonMeta):
                     if config.static_aliases
                     else None
                 ),
-                model_labels=parse_comma_separated_args(config.static_model_labels),
-                model_types=parse_comma_separated_args(config.static_model_types),
+                model_labels=parse_comma_separated_args(
+                    config.static_model_labels or None
+                ),
+                model_types=parse_comma_separated_args(
+                    config.static_model_types or None
+                ),
                 static_backend_health_checks=config.static_backend_health_checks,
                 static_backend_health_check_interval=config.static_backend_health_check_interval,
                 static_backend_health_check_timeout_seconds=config.static_backend_health_check_timeout_seconds,
