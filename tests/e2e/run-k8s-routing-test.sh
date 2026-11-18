@@ -123,7 +123,7 @@ deploy_helm_chart() {
 wait_for_pods() {
     print_status "⏳ Waiting for pods to be ready"
     chmod +x tests/e2e/wait-for-pods.sh
-    tests/e2e/wait-for-pods.sh --pod-prefix vllm --timeout 300 --verbose
+    tests/e2e/wait-for-pods.sh --pod-prefix vllm --timeout 600 --verbose
 }
 
 # Function to setup port forwarding
@@ -295,8 +295,13 @@ run_complete_test() {
     # Deploy helm chart
     deploy_helm_chart "$helm_values_file"
 
-    # Wait for pods
-    wait_for_pods
+    # Wait for pods (set -e does not apply here, so check explicitly)
+    if ! wait_for_pods; then
+        print_error "❌ vllm pods did not become ready"
+        collect_debug_logs "$test_type"
+        cleanup_resources
+        return 1
+    fi
 
     # Setup port forwarding for k8s discovery
     if ! setup_port_forwarding; then

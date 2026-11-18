@@ -398,8 +398,13 @@ async def process_request(
     if tracing_active:
         inject_context(headers, span_context)
 
-    # For non-streaming requests, collect the full response to cache it properly
-    full_response = bytearray()
+    # Streams only need a full copy when a post_request callback reads it.
+    body_consumed_by_callback = background_tasks is not None and (
+        getattr(request.app.state, "callbacks", None) is not None
+    )
+    full_response = (
+        bytearray() if not is_streaming or body_consumed_by_callback else None
+    )
     last_chunk = b""
 
     request_status = "aborted"
@@ -443,7 +448,6 @@ async def process_request(
                         request.app.state.request_stats_monitor.on_request_response(
                             request_handle, time.time()
                         )
-                    # For non-streaming requests, collect the full response
                     if full_response is not None:
                         full_response.extend(chunk)
                     yield chunk

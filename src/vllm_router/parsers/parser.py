@@ -135,23 +135,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--port", type=int, default=8080, help="The port to run the server on."
     )
     parser.add_argument(
-        "--root-path",
-        type=str,
-        default="",
-        help="FastAPI root path for hosting under a subpath (e.g. /vllm).",
-    )
-    parser.add_argument(
         "--timeout-keep-alive",
         type=int,
         default=5,
         help="Seconds to keep an idle HTTP keep-alive connection open before "
-        "the server closes it (passed through to uvicorn). Raise this above "
-        "the connection-reuse window of whatever sits in front of the router "
-        "(e.g. a Caddy/nginx reverse proxy, whose upstream keep-alive is "
-        "often 1-2 minutes) so the front end does not reuse a connection the "
-        "router has already closed, which surfaces as a slow/failed first "
-        "request after a few seconds of idle. Default is 5 (uvicorn's "
-        "default); set 0 to disable the timeout.",
+        "closing it (uvicorn default: 5). Raise it when clients reuse "
+        "connections across requests spaced more than a few seconds apart.",
+    )
+    parser.add_argument(
+        "--root-path",
+        type=str,
+        default="",
+        help="FastAPI root path for hosting under a subpath (e.g. /vllm).",
     )
     parser.add_argument(
         "--backend-connect-timeout",
@@ -512,7 +507,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="The minimum prefix match length required for prefixaware "
         "routing to reuse a matched endpoint. If the longest prefix "
         "match is shorter than this value, the request falls back to "
-        "QPS-based routing. Note: prefix matches are computed in "
+        "least-inflight routing via request_stats (same load signal as "
+        "loadaware). Note: prefix matches are computed in "
         "chunks (chunk_size, default 128 characters), so this "
         "threshold is effectively quantized to that granularity. "
         "Defaults to 0, which disables the threshold.",

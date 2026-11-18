@@ -2,12 +2,15 @@ import json
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
 
-from vllm_router.dynamic_config import DynamicRouterConfig
+from vllm_router.dynamic_config import DynamicConfigWatcher, DynamicRouterConfig
 from vllm_router.parsers import parser
+from vllm_router.routers.routing_logic import cleanup_routing_logic
 
 # The fork's startup-only operator flags. They are honored at startup (via
 # parser.set_defaults) but are NOT reconfigurable fields, so the dynamic-config
@@ -217,7 +220,7 @@ def test_from_args_matches_from_yaml_for_unchanged_file(monkeypatch, routing_opt
 
 
 def test_timeout_keep_alive_is_loaded_from_yaml_at_startup(monkeypatch):
-    # timeout_keep_alive is a fork-introduced flag consumed at startup: app.py
+    # timeout_keep_alive is a flag consumed at startup: app.py
     # hands args.timeout_keep_alive to uvicorn. Setting it only in the
     # --dynamic-config-yaml file (no CLI flag) must flow through parse_args'
     # set_defaults into args, so the value uvicorn receives is the YAML value.
@@ -237,3 +240,32 @@ def test_timeout_keep_alive_is_loaded_from_yaml_at_startup(monkeypatch):
         os.unlink(path)
 
     assert args.timeout_keep_alive == 120
+
+
+@pytest.fixture
+def clean_router_singletons():
+    cleanup_routing_logic()
+    yield
+    cleanup_routing_logic()
+
+
+@pytest.mark.parametrize(
+    "routing_logic",
+    ["disaggregated_prefill", "disaggregated_prefill_orchestrated"],
+)
+def test_reconfigure_routing_logic_keeps_prefill_decode_labels(
+    routing_logic, clean_router_singletons
+):
+    config = DynamicRouterConfig(
+        service_discovery="static",
+        routing_logic=routing_logic,
+        prefill_model_labels="prefill-a,prefill-b",
+        decode_model_labels="decode",
+    )
+    watcher = SimpleNamespace(app=MagicMock())
+
+    DynamicConfigWatcher.reconfigure_routing_logic(watcher, config)
+
+    router = watcher.app.state.router
+    assert router.prefill_model_labels == ["prefill-a", "prefill-b"]
+    assert router.decode_model_labels == ["decode"]
