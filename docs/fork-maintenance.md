@@ -395,3 +395,28 @@ returned 200. The previous amd64 image
 still returned 502 and sent no new query. The image contains no uvloop. ARM64
 execution, real Kubernetes DNS, and GPU inference were not tested. Running
 routers keep the cached failure until they are restarted with the new image.
+
+## Upstream reconciliation — 2026-11-18
+
+The fork and its release reconstruction now use `vllm-stack-0.1.14` at
+`405a2fa79992754d31f754c31b1eabb7183a540e`. The November 9 and 16 scheduled
+builds stopped before publication while applying the older fork delta. The
+reconciliation merges the tag into the fork and preserves published history.
+
+Use upstream's pooling route, keep-alive flag, aiohttp 3.14.5, and NumPy 2.2.6.
+The fork's previous NumPy relaxation addressed a Python 3.13 wheel gap in
+1.26.4. The upstream pin now has wheels for both image architectures. The
+lockfile follows upstream's Linux resolver platform constraints. The image
+continues to install only the default router dependencies.
+
+Upstream now isolates overlapping dispatches sharing a client request ID. The
+fork keeps its opaque handles, separate completion/failure/abort outcomes,
+locking, and backend timeout and DNS contracts. Keep upstream's overlap tests
+for both JSON and multipart requests. Streams accumulate a full body only for
+an active response callback. Bind that callback at dispatch so a configuration
+reload cannot deliver an incomplete body. On static discovery reload, empty
+optional model types and labels use the startup interpretation. Nonempty lists
+still undergo upstream's length checks.
+
+The chart matches upstream. Its two previously failing Helm assertions are
+fixed in 0.1.14. The fork continues to run only its router release workflow.
