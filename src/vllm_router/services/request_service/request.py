@@ -398,13 +398,14 @@ async def process_request(
     if tracing_active:
         inject_context(headers, span_context)
 
-    # Streams only need a full copy when a post_request callback reads it.
-    body_consumed_by_callback = background_tasks is not None and (
-        getattr(request.app.state, "callbacks", None) is not None
+    # Bind the body consumer at dispatch so a reload cannot attach a callback
+    # to a stream whose earlier bytes were already forwarded and discarded.
+    callbacks = (
+        getattr(request.app.state, "callbacks", None)
+        if background_tasks is not None
+        else None
     )
-    full_response = (
-        bytearray() if not is_streaming or body_consumed_by_callback else None
-    )
+    full_response = bytearray() if not is_streaming or callbacks is not None else None
     last_chunk = b""
 
     request_status = "aborted"
@@ -480,10 +481,8 @@ async def process_request(
             await store_in_semantic_cache(
                 endpoint=endpoint, method=request.method, body=body, chunk=cache_chunk
             )
-        if background_tasks and getattr(request.app.state, "callbacks", None):
-            background_tasks.add_task(
-                request.app.state.callbacks.post_request, request, full_response
-            )
+        if callbacks is not None:
+            background_tasks.add_task(callbacks.post_request, request, full_response)
     except (GeneratorExit, asyncio.CancelledError) as e:
         if entry_timeout is not None and entry_timeout.expired():
             # Normally the deadline's CancelledError becomes TimeoutError at

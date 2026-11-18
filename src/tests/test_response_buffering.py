@@ -137,3 +137,22 @@ async def test_non_streaming_response_reports_token_usage(monitor):
     after_out = REGISTRY.get_sample_value("vllm:output_tokens_total", labels)
     assert after_in - before_in == 11
     assert after_out - before_out == 22
+
+
+@pytest.mark.asyncio
+async def test_callback_enabled_midstream_starts_with_the_next_request(monitor):
+    request = _fake_request(monitor, [b"data: token\n\n"], "text/event-stream")
+    body = b'{"model":"test-model","stream":true}'
+    tasks = BackgroundTasks()
+    stream = process_request(request, body, URL, "req-1", "/v1/chat/completions", tasks)
+    await anext(stream)
+    callbacks = _RecordingCallbacks()
+    request.app.state.callbacks = callbacks
+    assert [chunk async for chunk in stream] == [b"data: token\n\n"]
+    await tasks()
+    assert callbacks.response_contents == []
+
+    tasks = BackgroundTasks()
+    received = await _consume(request, body, tasks)
+    await tasks()
+    assert callbacks.response_contents == [received]
