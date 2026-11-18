@@ -4,7 +4,7 @@
 
 This is a lightweight fork of [vllm-project/production-stack](https://github.com/vllm-project/production-stack) with the following changes:
 
-- **Multi-stage Docker build**: Builder stage installs dependencies with uv, runtime stage is just `python:3.13-slim` with the venv copied over. Image size reduced from ~5 GB to ~294 MB by defaulting `INSTALL_OPTIONAL_DEP` to empty (no PyTorch/sentence-transformers/vLLM).
+- **Multi-stage Docker build**: Builder stage installs dependencies with uv, runtime stage is just `python:3.13-slim` with the venv copied over. The default image omits PyTorch, sentence-transformers, and vLLM.
 - **Python 3.13**: Both builder and runtime stages use Python 3.13.
 - **Single-label hostname fix**: `validate_url` regex accepts Docker/K8s hostnames without dots (e.g., `http://vllm-worker:8000`). Upstream fix pending in [PR #1154](https://github.com/vllm-project/production-stack/pull/1154), which supersedes the closed #737.
 - **Qwen rerank template**: Preprocesses `/v1/rerank` requests for `Qwen/Qwen3-Reranker-0.6B` with the required chat template before forwarding to the backend. Malformed or non-object JSON uses upstream's shared 400 response contract.
@@ -12,7 +12,7 @@ This is a lightweight fork of [vllm-project/production-stack](https://github.com
 - **Model alias discovery**: `/v1/models` lists static aliases alongside canonical model names so clients can discover the names they may request.
 - **Request lifecycle and backend timeouts**: Each attempt records completion, failure, or client cancellation exactly once. Connect and read-silence bounds return structured 502/504 errors, including an in-band terminal event for stalled SSE streams. See [Request-stats lifecycle](#request-stats-lifecycle).
 - **Multipart compatibility**: Includes upstream audio translation routing, text/SRT/VTT responses, and automatic transcription language detection. Priority and prefix routing also work with multipart requests. HTML backend error pages and malformed backend JSON still return 502, with the fork's lifecycle cleanup preserved.
-- **Backend DNS recovery**: Backend and external-provider hostnames are resolved with the system resolver (`getaddrinfo`) instead of aiohttp's c-ares default, which `aiohttp[speedups]` enables. c-ares kept its own cache of failed lookups inside the router for up to an hour, so a backend Service or container created after the router first tried it kept returning 502 `backend_connect_error` until that entry expired or the router restarted. The router now asks the system resolver again on the next request. Negative caching in CoreDNS, systemd-resolved, or another upstream resolver still applies, and aiohttp still caches successful lookups for 10 s. This covers the proxy client, disaggregated-prefill sessions, sleep/wake calls, and OpenAI-compatible external providers; running routers need the new image to pick it up. See [Backend DNS resolution](docs/fork-maintenance.md#backend-dns-resolution--october-2026).
+- **Backend DNS recovery**: Backend and external-provider hostnames are resolved with the system resolver (`getaddrinfo`) instead of aiohttp's c-ares default, which `aiohttp[speedups]` enables. c-ares kept its own cache of failed lookups inside the router for up to an hour, so a backend Service or container created after the router first tried it kept returning 502 `backend_connect_error` until that entry expired or the router restarted. The router now asks the system resolver again on the next request. Negative caching in CoreDNS, systemd-resolved, or another upstream resolver still applies, and aiohttp still caches successful lookups for 10 s. This covers the proxy client, disaggregated-prefill sessions, sleep/wake calls, and OpenAI-compatible external providers; running routers need the new image to pick it up. The shared-client change is pending in [upstream PR #1162](https://github.com/vllm-project/production-stack/pull/1162). See [Backend DNS resolution](docs/fork-maintenance.md#backend-dns-resolution--october-2026).
 - **Dynamic-config file accepts all fork flags**: The `--dynamic-config-yaml` / `--dynamic-config-json` watcher used to reject any key that was not a hot-reloadable field, raising `TypeError` every 10 s and silently killing hot-reload of service discovery / routing. The fork's startup-only flags — the backend socket timeouts — therefore could not live in the config file you already pass, even though they load fine at startup. The watcher now tolerates non-reconfigurable keys: they are honored at startup and ignored (debug-logged) on reload, so you can keep all configuration in one file. See [Loading fork flags from the dynamic config file](#loading-fork-flags-from-the-dynamic-config-file) below.
 
 The checkout includes upstream `vllm-stack-0.1.14` at `405a2fa`. Upstream now
@@ -22,10 +22,10 @@ retaining the full body. A configured response callback receives the complete
 body for requests dispatched while it is active. The fork also preserves live
 discovery reload for static backends that omit model types.
 
-Pre-built images are published to Docker Hub, tagged to match upstream releases:
+The published router image is available for linux/amd64 and linux/arm64. See the [0.1.14 release record](docs/fork-maintenance.md#authorized-release--2026-11-18) for the verified digest.
 
 ```console
-docker pull openimage/production-stack-router:v0.1.13
+docker pull openimage/production-stack-router:v0.1.14
 ```
 
 The release workflow applies the reconciled fork changes, including merge resolutions, onto an upstream release tag and runs the router regression suite before publishing versioned images. It requires HTTP 200 from the image's `/health` before promoting `latest`.
@@ -99,7 +99,7 @@ static_models:
     static_backends:
       - http://vllm-worker:8000
 
-# Fork flags — same file, no command-line flags needed:
+# Startup-only settings
 backend_connect_timeout: 10.0
 backend_read_timeout: 300.0
 timeout_keep_alive: 5

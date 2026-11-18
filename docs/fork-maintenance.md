@@ -420,3 +420,34 @@ still undergo upstream's length checks.
 
 The chart matches upstream. Its two previously failing Helm assertions are
 fixed in 0.1.14. The fork continues to run only its router release workflow.
+
+## Authorized release — 2026-11-18
+
+[Run 44257965879](https://github.com/Mazyod/production-stack/actions/runs/44257965879)
+published fork source `6b32c88d97d556e44217877980cba7d0b6fe6a93` on upstream
+`vllm-stack-0.1.14`. The checkout, local clean-clone reconstruction, and CI
+reconstruction all produced tree `b2d48f6d12c40aec2eceb8f1cab8a3d1bca9691a`.
+
+Docker Hub tags `v0.1.14`, `vllm-stack-0.1.14`, and `latest` all resolved to
+`sha256:9923bbb6935aab60889921bff9f77151b026fbe94e1bda128e81852704f4310d`
+after the published image returned HTTP 200 from `/health`. The release
+contains linux/amd64 and linux/arm64 manifests.
+
+All 362 router and release tests passed on Python 3.13 with the lockfile, with
+fresh dependencies in the reconstructed checkout, and in CI. Standard
+pre-commit, Helm lint, all 149 Helm tests, and the operator's `TestDeployment`
+checks passed. Independent review identified the two reload issues recorded
+above and verified their fixes.
+
+The locally built and digest-pinned published amd64 images passed HTTP checks
+against fake engines for model aliases, pooling, systemone/decisions, reranking,
+multipart text transcription, 502 failover exhaustion, and recovery after a
+previously missing Docker hostname became available. A header stall returned
+504 and a stalled SSE stream emitted its terminal error and `[DONE]`. Two
+concurrent streams sharing a request ID counted independently. Disconnecting
+one recorded an abort, the other completed beyond the read bound, and the
+counters drained. A live YAML edit reloaded multiple untyped backends and
+enabled a callback mid-stream. The next stream delivered its complete body to
+that callback. The published amd64 image contained Python 3.13.18, aiohttp
+3.14.5, and NumPy 2.2.6. ARM64 execution, Kubernetes deployment, and GPU
+inference were outside this verification.
