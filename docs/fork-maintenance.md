@@ -475,3 +475,34 @@ enabled a callback mid-stream. The next stream delivered its complete body to
 that callback. The published amd64 image contained Python 3.13.18, aiohttp
 3.14.5, and NumPy 2.2.6. ARM64 execution, Kubernetes deployment, and GPU
 inference were outside this verification.
+
+## Authorized release — 2026-11-24
+
+The user authorized shipping the early-disconnect fix as a 0.1.14 release
+rather than rebuilding the 0.1.13 image running in production.
+[Run 45399160191](https://github.com/Mazyod/production-stack/actions/runs/45399160191)
+published fork source `c20fcce4e218a1f023a3c6761b664a42dd1ff638` on upstream
+`vllm-stack-0.1.14`. The checkout, a local clean-clone reconstruction, and CI
+all produced tree `e1aa0dadd08d844394e372208ea3059ec389237e`. CI's build commit
+was `0c2ce42`, so the image reports version `0.1.15.dev1+g0c2ce4215.d20261124`.
+setuptools_scm derives that from the tag; the `.d` suffix only reflects the
+Docker build context, which omits tracked files outside `src/`.
+
+Docker Hub tags `v0.1.14`, `vllm-stack-0.1.14`, and `latest` resolve to
+`sha256:0315de2e714b12e740c328e84f476a4a940f1dc01d6ae10263658931869baddc`
+(linux/amd64 `sha256:15de27ab922804dd99199767d19dc1f018d93fec09a64e261ecfbe1d3a42b725`)
+after the published image returned HTTP 200 from `/health`. This replaces the
+2026-11-18 digest under the same tags.
+
+All 368 router and release tests passed in CI and on the reconstruction, with
+both locked and freshly resolved dependencies. Standard pre-commit hooks
+passed. An independent review of the disconnect change found no material
+issue. The locally built candidate and the digest-pinned published amd64
+image passed the same HTTP checks against a fake engine. A non-streaming
+client that left at 2 s made the engine see the upstream close at 2.0 s, a
+stream disconnect closed the upstream at 3.0 s, and an aliased completion
+logged its requested and routed model names. A 2 s read bound still returned
+504 `backend_read_timeout`, and the counters drained. The published image
+contained Python 3.13.18, aiohttp 3.14.5, Starlette 1.10.0, and uvicorn 0.34.0.
+ARM64 execution, real vLLM, and the production Caddy front end were outside
+this verification.

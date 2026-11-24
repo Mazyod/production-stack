@@ -23,7 +23,7 @@ retaining the full body. A configured response callback receives the complete
 body for requests dispatched while it is active. The fork also preserves live
 discovery reload for static backends that omit model types.
 
-The published router image is available for linux/amd64 and linux/arm64. See the [0.1.14 release record](docs/fork-maintenance.md#authorized-release--2026-11-18) for the verified digest.
+The published router image is available for linux/amd64 and linux/arm64. See the [0.1.14 release record](docs/fork-maintenance.md#authorized-release--2026-11-24) for the verified digest.
 
 ```console
 docker pull openimage/production-stack-router:v0.1.14
