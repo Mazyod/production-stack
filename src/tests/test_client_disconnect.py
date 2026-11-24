@@ -1,4 +1,4 @@
-"""Client disconnects reach the engine.
+"""Client disconnects reach the engine; routing logs attribute the caller.
 
 A real uvicorn router and a real aiohttp fake engine: when the client leaves,
 the router must close its upstream request so vLLM aborts the generation.
@@ -251,6 +251,27 @@ async def test_read_timeout_still_returns_504_and_closes_upstream(router):
     await _eventually(lambda: "silent" in router.engine.closed)
     await _eventually(lambda: _retired_without_completion(router))
     assert router.engine.closed["silent"] - started < 1.5
+
+
+async def test_routing_log_attributes_the_caller(router):
+    """The alias rewrite is otherwise silent: log what the caller asked for."""
+    router.discovery.aliases = {"caller-alias": "test-model"}
+    with patch.object(request_module, "logger") as logger:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"http://127.0.0.1:{router.port}/v1/chat/completions",
+                json={"model": "caller-alias", "max_tokens": 64, "hold": 0},
+            ) as response:
+                assert response.status == 200
+    routing_lines = [
+        call.args[0]
+        for call in logger.info.call_args_list
+        if call.args[0].startswith("Routing request")
+    ]
+    assert len(routing_lines) == 1
+    assert routing_lines[0].endswith(
+        "requested_model='caller-alias' model='test-model' stream=False max_tokens=64"
+    )
 
 
 async def test_rerank_rewrite_neither_spins_nor_aborts(router):

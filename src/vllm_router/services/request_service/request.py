@@ -670,6 +670,7 @@ async def route_general_request(
             content={"error": "Invalid request: missing 'model' in request body."},
             headers={"X-Request-Id": request_id},
         )
+    client_model = requested_model  # aliases rewrite requested_model below
 
     # Add model info to parent span
     if span is not None:
@@ -806,7 +807,10 @@ async def route_general_request(
     logger.debug(f"Debug session extraction - Extracted session ID: {session_id}")
 
     logger.info(
-        f"Routing request {request_id} with session id {session_id_display} to {server_url} at {curr_time}, process time = {curr_time - in_router_time:.4f}"
+        f"Routing request {request_id} with session id {session_id_display} to {server_url} at {curr_time}, process time = {curr_time - in_router_time:.4f}, "
+        f"requested_model={client_model!r} model={requested_model!r} "
+        f"stream={request_json.get('stream', False)!r} "
+        f"max_tokens={request_json.get('max_completion_tokens') or request_json.get('max_tokens')!r}"
     )
 
     # Add backend URL to parent span
