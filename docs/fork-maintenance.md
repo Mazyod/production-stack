@@ -234,7 +234,9 @@ Since 2026-11-24 there is no limit on open PRs. The user's direction is to
 share every finding verified against `upstream/main` and let upstream decide
 what is useful. Pair a bug that has a fork fix with an issue and a PR; file
 features, proposals and observations as issues. Search upstream first and
-comment on an existing issue or PR instead of opening a duplicate.
+comment on an existing issue or PR instead of opening a duplicate. Read the issue's
+timeline for linked PRs (`gh api repos/vllm-project/production-stack/issues/N/timeline`),
+because keyword search missed one in November.
 
 ## Verification and maintaining context
 
@@ -519,10 +521,12 @@ upstream and let upstream decide what is useful. Each item was first checked
 against `upstream/main` `405a2fa` and searched for duplicates. All were posted
 as `Mazyod` with DCO sign-off, from topic branches on origin.
 
-- [PR #1233](https://github.com/vllm-project/production-stack/pull/1233)
-  (fixes [#634](https://github.com/vllm-project/production-stack/issues/634)):
-  abort the backend request when the client disconnects before headers. The
-  port drops the fork's timeout-specific test; 286 upstream tests pass.
+- Early disconnect ([#634](https://github.com/vllm-project/production-stack/issues/634)):
+  we opened PR #1233, then found the earlier equivalent
+  [PR #1040](https://github.com/vllm-project/production-stack/pull/1040),
+  which handles caller cancellation more carefully. Rebased onto main (keeping
+  main's `finally`), #1040 passed all 289 upstream tests and our real-socket
+  test. We closed #1233 and posted that evidence on #1040.
 - [Issue #1231](https://github.com/vllm-project/production-stack/issues/1231) /
   [PR #1234](https://github.com/vllm-project/production-stack/pull/1234):
   abandoned requests were recorded as `status="success"`. This is the
