@@ -227,9 +227,14 @@ merges small `[Bugfix][Router]` PRs that link an issue, include a test, and
 change no defaults. Effectively one maintainer, `ruizhang0101`, reviews and
 merges; CI for first-time contributors waits for that maintainer's approval.
 Answer every gemini-code-assist comment before asking for review. After 3–5
-quiet days, follow up with a single mention. Keep at most two PRs open, and
-start features with an issue or proposal. The patch index records which fork
+quiet days, follow up with a single mention. The patch index records which fork
 patches are pending upstream.
+
+Since 2026-11-24 there is no limit on open PRs. The user's direction is to
+share every finding verified against `upstream/main` and let upstream decide
+what is useful. Pair a bug that has a fork fix with an issue and a PR; file
+features, proposals and observations as issues. Search upstream first and
+comment on an existing issue or PR instead of opening a duplicate.
 
 ## Verification and maintaining context
 
@@ -506,3 +511,42 @@ logged its requested and routed model names. A 2 s read bound still returned
 contained Python 3.13.18, aiohttp 3.14.5, Starlette 1.10.0, and uvicorn 0.34.0.
 ARM64 execution, real vLLM, and the production Caddy front end were outside
 this verification.
+
+## Upstream contributions — 2026-11-24
+
+The user removed the open-PR limit and asked to share every finding with
+upstream and let upstream decide what is useful. Each item was first checked
+against `upstream/main` `405a2fa` and searched for duplicates. All were posted
+as `Mazyod` with DCO sign-off, from topic branches on origin.
+
+- [PR #1233](https://github.com/vllm-project/production-stack/pull/1233)
+  (fixes [#634](https://github.com/vllm-project/production-stack/issues/634)):
+  abort the backend request when the client disconnects before headers. The
+  port drops the fork's timeout-specific test; 286 upstream tests pass.
+- [Issue #1231](https://github.com/vllm-project/production-stack/issues/1231) /
+  [PR #1234](https://github.com/vllm-project/production-stack/pull/1234):
+  abandoned requests were recorded as `status="success"`. This is the
+  latency-status part of the fork's lifecycle patch; separate outcome counters
+  are left to upstream.
+- [Issue #1232](https://github.com/vllm-project/production-stack/issues/1232) /
+  [PR #1235](https://github.com/vllm-project/production-stack/pull/1235): a
+  startup-only flag in the dynamic config file broke every reload. The issue
+  also reports the `k8s_*` default mismatch that triggers a needless first
+  reconfigure; the PR leaves that out.
+- [Issue #1236](https://github.com/vllm-project/production-stack/issues/1236):
+  eight stats and metrics findings from the November incident, including the
+  blocking `/metrics` handler and unlocked cross-thread reads.
+- [Issue #1237](https://github.com/vllm-project/production-stack/issues/1237):
+  aliases in `/v1/models` and caller attribution in the routing log.
+- [Issue #1238](https://github.com/vllm-project/production-stack/issues/1238):
+  a slim image variant (86 MB instead of 4.2 GB compressed).
+- Comments on [PR #1082](https://github.com/vllm-project/production-stack/pull/1082#issuecomment-7133124388)
+  (silence-based backend timeouts) and
+  [issue #1141](https://github.com/vllm-project/production-stack/issues/1141#issuecomment-7133125015)
+  (reload-default lessons).
+
+Not proposed: the Qwen rerank template, which is a model-specific workaround,
+and the default port 8080, which is a deployment preference. Upstream's
+`uv.lock` is stale relative to its `pyproject.toml` (it has no aiohttp entry),
+so upstream verification used freshly resolved dependencies on Python 3.12,
+plus `httpx`/`httpx2` for the Starlette test client.
