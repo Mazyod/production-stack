@@ -100,6 +100,30 @@ are in the [operator contract](../README.md#backend-socket-timeouts).
 Evidence: `38eb146`, `a193009`, `62a0289`, and the lifecycle, socket-timeout,
 timeout-contract, and transcription tests under `src/tests/`.
 
+### Client disconnect before backend headers — November 2026
+
+Starlette watches for a client disconnect only once a `StreamingResponse`
+starts, which is after the backend's response headers arrive. A non-streaming
+vLLM response sends headers only when generation finishes, so a client that
+left early kept its request generating until it completed or the read bound
+fired. `route_general_request` now races the header wait against the client's
+`http.disconnect`, like vLLM's `@with_cancellation`. Cancelling the attempt
+closes the upstream connection, so the engine aborts, and retires it as an
+abort. The watcher reads one ASGI message after the body; anything else, or an
+error, means it cannot report a disconnect, and it waits. Never loop on
+`receive()` there: the rerank route's synthetic receive replays its body
+without yielding and would block the event loop. As a result, `/v1/rerank`
+gets no early abort. The multipart and disaggregated-prefill paths do not use
+this wait. If the entry deadline expires in the same loop tick as the
+disconnect, the attempt retires as a timeout failure while the log reports the
+disconnect.
+
+Evidence: on 2026-11-24 a live router kept a non-streaming request at a fake
+engine for the engine's full 20 s after the client left at 2 s; with the fix,
+the engine saw the close at 2.0 s. `test_client_disconnect.py` runs a real
+uvicorn router and aiohttp engine for early non-streaming disconnects,
+completions, stream disconnects, read timeouts, and the rerank rewrite.
+
 ### Dynamic configuration — July 2026
 
 Startup and reload read the same file through different paths. Recognized
